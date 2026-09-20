@@ -22,6 +22,7 @@ from dynamo.sglang.protocol import (
     SglangMultimodalRequest,
     StopConditions,
 )
+from dynamo.sglang.request_handlers.multimodal import worker_handler
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
     _NVDEC_SHIM_FPS,
     Modality,
@@ -286,8 +287,6 @@ async def test_multimodal_prefill_starts_before_returning_bootstrap():
 async def test_multimodal_prefill_releases_embeddings_when_submission_fails(
     monkeypatch,
 ):
-    import dynamo.sglang.request_handlers.multimodal.worker_handler as worker_handler
-
     handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
     handler.bootstrap_host = "prefill-host"
     handler.bootstrap_port = 1234
@@ -351,8 +350,6 @@ def _thinking_budget_prefill_handler(engine):
 
 @pytest.mark.asyncio
 async def test_multimodal_prefill_overwrites_forwarded_thinking_budget(monkeypatch):
-    import dynamo.sglang.request_handlers.multimodal.worker_handler as worker_handler
-
     captured = {}
 
     class RecordingEngine:
@@ -374,6 +371,25 @@ async def test_multimodal_prefill_overwrites_forwarded_thinking_budget(monkeypat
 
     assert captured["sampling_params"]["custom_params"] == {"thinking_budget": 32}
     assert captured["require_reasoning"] is True
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_propagates_invalid_request_errors():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    handler._validate_and_parse_disagg_request = lambda request: request
+    handler._generate_bootstrap_room = lambda: 17
+
+    async def reject_request(*_args, **_kwargs):
+        raise InvalidArgument("thinking_token_budget is not supported")
+
+    handler._start_prefill_or_cancel = reject_request
+
+    stream = handler.generate(object(), _FakeContext("request-id"))
+    with pytest.raises(InvalidArgument, match="thinking_token_budget"):
+        await anext(stream)
 
 
 @pytest.mark.asyncio
