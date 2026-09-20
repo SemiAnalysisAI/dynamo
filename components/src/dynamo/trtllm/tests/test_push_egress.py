@@ -708,10 +708,6 @@ class TestDecoratorAppliedToRealHandlers:
     import-based test would silently skip everywhere except a GPU container
     and would therefore never guard anything in normal CI.
 
-    Confirmed equivalent in the worker-egress-push container, where the TRT-LLM
-    classes report
-    `params=['self', 'request', 'context', 'response_sender', 'kwargs']`.
-
     Dropping the decorator from a handler is invisible at runtime: that
     endpoint just reverts to the pull path, with no error and no failure.
     """
