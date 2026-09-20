@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for push_egress.py — the inverted push-egress path for TRT-LLM workers.
+"""Unit tests for push_egress.py — the inverted Python worker response path.
 
 These tests are designed to BREAK the implementation; a passing run that finds
 nothing is a failed deliverable.  Every test targets a specific claim in the
@@ -190,7 +190,7 @@ def reset_logged_no_sender():
 class TestSignatureClaim:
     """The Rust opt-in check calls inspect.signature(handler).parameters.
 
-    If response_sender is missing from the outermost signature, every TRT-LLM
+    If response_sender is missing from the outermost signature, every decorated
     endpoint silently falls back to the pull path and the whole change is a no-op.
     """
 
@@ -704,12 +704,12 @@ class TestDecoratorAppliedToRealHandlers:
     """Every LLM handler `generate` must carry @push_egress_capable.
 
     Verified against the source with `ast` rather than by importing the
-    classes: importing them pulls in tensorrt_llm, which needs CUDA, so an
+    classes: importing them pulls in engine packages that need CUDA, so an
     import-based test would silently skip everywhere except a GPU container
     and would therefore never guard anything in normal CI.
 
-    Confirmed equivalent in the worker-egress-push container, where all four
-    real classes report
+    Confirmed equivalent in the worker-egress-push container, where the TRT-LLM
+    classes report
     `params=['self', 'request', 'context', 'response_sender', 'kwargs']`.
 
     Dropping the decorator from a handler is invisible at runtime: that
@@ -717,8 +717,13 @@ class TestDecoratorAppliedToRealHandlers:
     """
 
     HANDLERS: ClassVar[dict[str, list[str]]] = {
-        "handlers.py": ["EncodeHandler", "PrefillHandler", "DecodeHandler"],
-        "aggregated_handler.py": ["AggregatedHandler"],
+        "trtllm/request_handlers/handlers.py": [
+            "EncodeHandler",
+            "PrefillHandler",
+            "DecodeHandler",
+        ],
+        "trtllm/request_handlers/aggregated_handler.py": ["AggregatedHandler"],
+        "sglang/request_handlers/llm/decode_handler.py": ["DecodeWorkerHandler"],
     }
 
     @staticmethod
@@ -743,7 +748,7 @@ class TestDecoratorAppliedToRealHandlers:
         [(m, c) for m, cs in HANDLERS.items() for c in cs],
     )
     def test_generate_is_push_egress_capable(self, module, class_name):
-        path = _COMPONENTS_SRC / "dynamo" / "trtllm" / "request_handlers" / module
+        path = _COMPONENTS_SRC / "dynamo" / module
         decorators = self._generate_decorators(path, class_name)
         assert "push_egress_capable" in decorators, (
             f"{class_name}.generate is missing @push_egress_capable "
@@ -758,7 +763,7 @@ class TestDecoratorAppliedToRealHandlers:
     def test_push_egress_capable_is_outermost(self, module, class_name):
         """It must be first in the list: `inspect.signature` sees the outermost
         wrapper, and range_decorator must wrap a real async-gen function."""
-        path = _COMPONENTS_SRC / "dynamo" / "trtllm" / "request_handlers" / module
+        path = _COMPONENTS_SRC / "dynamo" / module
         decorators = self._generate_decorators(path, class_name)
         assert decorators[0] == "push_egress_capable", (
             f"{class_name}.generate: @push_egress_capable must be OUTERMOST, "
@@ -772,12 +777,13 @@ class TestDecoratorAppliedToRealHandlers:
 
 
 class TestNoBleedIntoOtherEngines:
-    """Only TRT-LLM handlers may be push-capable.
+    """Only the shared helper may declare ``response_sender`` directly.
 
     `Endpoint.serve_endpoint` is shared by every Python worker -- vLLM, SGLang,
     frontend, planner, router, mocker, and more -- and the ONLY thing keeping
     them on the pull path is that `handler_supports_push` finds no
-    `response_sender` parameter on their handlers.
+    `response_sender` parameter on their handlers. Approved handlers gain that
+    parameter through ``@push_egress_capable`` instead of declaring it.
 
     So the moment any other engine's handler declares a parameter with that
     name, for any unrelated reason, Rust drives it with the push engine. It
@@ -812,7 +818,8 @@ class TestNoBleedIntoOtherEngines:
                 offenders[path.relative_to(_COMPONENTS_SRC).as_posix()] = hits
 
         assert not offenders, (
-            "non-TRT-LLM code declares a `response_sender` parameter: "
+            "code outside the shared push-egress helper declares a "
+            "`response_sender` parameter: "
             f"{offenders}. Endpoint.serve_endpoint selects the push egress "
             "engine purely on that parameter name, so these handlers would be "
             "driven in push mode without ever pushing -- silently degrading "

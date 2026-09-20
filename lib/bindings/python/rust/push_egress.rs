@@ -16,7 +16,7 @@
 //!
 //! Selected per handler by signature — [`handler_supports_push`] picks this
 //! path for a handler declaring a `response_sender` parameter, which in
-//! practice means the TRT-LLM `@push_egress_capable` decorator
+//! practice means the TRT-LLM or SGLang `@push_egress_capable` decorator
 //! (`components/src/dynamo/trtllm/request_handlers/push_egress.py`). There is
 //! no environment variable: that decorator is the switch, so the two halves
 //! cannot disagree about which path an endpoint is on. Every other Python
@@ -62,7 +62,7 @@ use crate::python_payload::{self, PythonPayload};
 pub(crate) fn handler_supports_push(handler: &PyObject) -> bool {
     // MUST be `response_sender`, not `context`. Every handler accepts `context`,
     // so checking for it makes this test always true and the pull-path fallback
-    // unreachable — every non-TRT-LLM Python handler in the repo would then be
+    // unreachable — every Python handler without the decorator would then be
     // driven in push mode and never terminate its stream.
     // `push_egress_capable` deletes its own `__wrapped__` precisely so
     // `inspect.signature` reports this parameter through the decorator.
