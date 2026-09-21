@@ -119,11 +119,21 @@ config['settings'] = settings
 config.pop('stdout', None)
 node = os.environ['SLURMD_NODENAME']
 gres_positive = False
+gres_selectors_valid = True
+gres_selector_evidence = []
 for line in gres.get('text', '').splitlines():
     values = assignments(line)
-    # Other nodes and unresolved range selectors are not evidence for this node.
-    if values.get('NodeName', node) != node:
-        continue
+    selector = values.get('NodeName')
+    if selector is not None and selector != node and selector != 'ALL':
+        expanded = capture(['scontrol', 'show', 'hostnames', selector])
+        gres_selector_evidence.append(expanded)
+        hosts = expanded.get('stdout', '').splitlines()
+        if expanded.get('returncode') != 0 or not hosts or any(
+                not re.fullmatch(r'[A-Za-z0-9_.-]+', host) for host in hosts):
+            gres_selectors_valid = False
+            continue
+        if node not in hosts:
+            continue
     if values.get('AutoDetect', '').lower() == 'rsmi':
         gres_positive = True
     elif 'AutoDetect' in values:
@@ -133,7 +143,7 @@ for line in gres.get('text', '').splitlines():
 checks = {
     'constrain_devices': assignments(cgroup.get('text', '')).get('ConstrainDevices', '').lower() == 'yes',
     'task_cgroup': config.get('returncode') == 0 and 'task/cgroup' in settings.get('TaskPlugin', '').split(','),
-    'gres_device_mapping_configured': gres_positive,
+    'gres_device_mapping_configured': gres_positive and gres_selectors_valid,
 }
 environment = {
     'schema_version': 1, 'job_id': os.environ['SLURM_JOB_ID'], 'node': node,
@@ -141,6 +151,7 @@ environment = {
     'amdgpu_version': read_evidence(pathlib.Path('/sys/module/amdgpu/version')),
     'cgroup_membership': read_evidence(pathlib.Path('/proc/self/cgroup')),
     'cgroup_config': cgroup, 'gres_config': gres, 'scheduler_config': config,
+    'gres_selector_expansion': gres_selector_evidence,
     'scheduler_node': capture(['scontrol', 'show', 'node', '-o', node]),
     'enroot_version': capture(['enroot', 'version'], timeout=10),
     'device_isolation_checks': checks,
