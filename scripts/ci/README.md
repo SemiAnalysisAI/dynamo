@@ -33,11 +33,16 @@ local artifact parity, and hosted Actions connectivity still require qualificati
 
 Before pushing/bootstrap on `SemiAnalysisAI/dynamo`, keep Actions disabled or
 individually disable inherited workflows. Configure a protected `barite-rocm`
-environment with required review, the two dedicated key secrets, and the pinned
+environment restricted to deployments from `main`, with required review, the two dedicated key secrets, and the pinned
 `BARITE_KNOWN_HOSTS` variable. Bootstrap the reviewed workflow/controller on `main`,
 then enable only `rocm-ci.yaml` after confirming inherited workflows remain disabled.
 The new workflow is manual, fork-only, main-only, and serializes its own campaigns.
 It does not serialize separately launched local jobs.
+
+The fork bootstrap preserves inherited workflows in `.github/upstream-workflows/`,
+outside GitHub's workflow discovery directory. This also prevents automatic runs
+when inherited workflow IDs have not yet been indexed and cannot be disabled via
+the API. Keep this fork-only change when syncing upstream.
 
 ## First local build
 
