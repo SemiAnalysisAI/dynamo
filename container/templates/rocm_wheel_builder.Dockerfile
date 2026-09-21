@@ -56,7 +56,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=shared \
     python3 -m build --wheel --no-isolation --outdir /opt/dynamo/dist .
 
 # Build the Cairo binding here so runtime dependency installation needs no compiler.
-RUN python3 -m pip wheel --no-deps --wheel-dir /opt/dynamo/dist pycairo==1.28.0
+# Explicit compilers keep Meson from auto-selecting sccache with the base image's
+# empty SCCACHE_S3_NO_CREDENTIALS setting.
+RUN CC=/usr/bin/cc CXX=/usr/bin/c++ \
+    python3 -m pip wheel --no-deps --wheel-dir /opt/dynamo/dist pycairo==1.28.0
 
 COPY container/deps/requirements.aisimulate.txt /tmp/requirements.aisimulate.txt
 RUN python3 -m pip download --only-binary=:all: --no-deps --no-index \
