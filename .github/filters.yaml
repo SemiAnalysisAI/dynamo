@@ -136,6 +136,8 @@ ignore:
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
+  # rocm-ci.yaml runs these tests whenever container sources change.
+  - 'container/tests/**'
   # Removed by trtllm upstream-base migration; claim here so changed-files
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
@@ -368,6 +370,7 @@ vllm:
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
   - 'container/templates/vllm_*'
+  - 'container/templates/rocm_wheel_builder.Dockerfile'
   - '!**/*.md'
   - '!**/*.rst'
 
