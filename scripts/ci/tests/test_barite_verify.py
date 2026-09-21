@@ -183,7 +183,7 @@ class VerifyTests(unittest.TestCase):
                 ("nats", "etcd_client", "etcd_peer", "frontend", "system")
             )
         }
-        return {
+        evidence = {
             "status": "passed",
             "run_key": self.request["run_key"],
             "source_sha": self.request["source_sha"],
@@ -203,6 +203,16 @@ class VerifyTests(unittest.TestCase):
                 for role, port in ports.items()
             ],
         }
+
+        evidence["service_listeners"] = [
+            {
+                **{key: value for key, value in entry.items() if key != "role"},
+                "service_roles": ["frontend", "system"],
+            }
+            for entry in evidence["listeners"]
+            if entry["role"] in ("frontend", "system")
+        ]
+        return evidence
 
     def test_listener_gate_rejects_missing_wildcard_stale_and_wrong_run(self):
         valid = self.listener_evidence()
@@ -225,6 +235,75 @@ class VerifyTests(unittest.TestCase):
                 verify.verify_listener_evidence(
                     evidence, self.request, "frontend", "123", 1
                 )
+
+    def test_expanded_service_inventory_rejects_exposed_or_missing_listener(self):
+        for fault in ("exposed", "empty", "owner", "endpoint"):
+            evidence = self.listener_evidence()
+            if fault == "exposed":
+                evidence["service_listeners"].append(
+                    {
+                        **evidence["service_listeners"][0],
+                        "port": 42207,
+                        "address": "192.168.1.64",
+                    }
+                )
+            elif fault == "empty":
+                evidence["service_listeners"] = []
+            elif fault == "owner":
+                evidence["service_listeners"][0]["pid"] = 999
+            else:
+                evidence["service_listeners"][0]["port"] = 42207
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                verify.verify_listener_evidence(
+                    evidence, self.request, "frontend", "123", 0
+                )
+        evidence = self.listener_evidence()
+        evidence["service_listeners"].append(
+            {**evidence["service_listeners"][0], "port": 42207, "address": "127.0.0.1"}
+        )
+        verify.verify_listener_evidence(evidence, self.request, "frontend", "123", 0)
+
+    def test_service_capture_uses_only_anchor_pid_and_rejects_pid_reuse(self):
+        source = Path(verify.__file__).parent / "rocm/pytest_driver.py"
+        tree = ast.parse(source.read_text())
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "service_listeners"
+        )
+        process = SimpleNamespace(
+            create_time=lambda: 1,
+            net_connections=lambda **_: [
+                SimpleNamespace(
+                    status="LISTEN",
+                    laddr=SimpleNamespace(port=42207, ip="192.168.1.64"),
+                )
+            ],
+        )
+        visited = []
+
+        def lookup(pid):
+            visited.append(pid)
+            return process
+
+        namespace = {
+            "psutil": SimpleNamespace(Process=lookup, CONN_LISTEN="LISTEN"),
+            "time": SimpleNamespace(time=lambda: 2),
+        }
+        exec(  # noqa: S102 -- execute only the trusted capture helper
+            compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"),
+            namespace,
+        )
+        anchors = [
+            {"pid": 11, "role": "frontend", "root_pid": 10, "process_created_at": 1}
+        ]
+        records = namespace["service_listeners"](anchors)
+        self.assertEqual(visited, [11])
+        self.assertEqual(records[0]["address"], "192.168.1.64")
+        self.assertEqual(records[0]["service_roles"], ["frontend"])
+        process.create_time = lambda: 3
+        with self.assertRaisesRegex(ValueError, "PID was reused"):
+            namespace["service_listeners"](anchors)
 
     def test_owned_listener_capture_filters_unrelated_ports(self):
         source = Path(verify.__file__).parent / "rocm/pytest_driver.py"

@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 This lane stages reviewed Dynamo source over SSH and builds/tests it in a one-GPU
 Slurm allocation using Pyxis/Enroot. The login host only stages files and controls
-Slurm. The implementation has offline tests; a successful HIP/Dynamo hardware run,
-local artifact parity, and hosted Actions connectivity still require qualification.
+Slurm. Offline tests validate the controller. Qualify each source/controller
+contract with a successful local build and HIP/Dynamo test run, a fresh local
+allocation reusing that image, and an Actions run reusing the same image.
 
 ## Prerequisites
 
@@ -89,6 +90,19 @@ the pinned model cache, and runs tests in a fresh container step. It preserves t
 scheduler's GPU assignment. Images are published as
 `images/<sha256>/image.sqsh`; model snapshots live under `models/<manifest-hash>`.
 No host Docker daemon or login-node compiler is used.
+
+Runtime library caches use per-allocation writable scratch. AITER keeps access to
+the image's prebuilt modules through verified symlinks in its private JIT cache;
+`aiter-cache.json` records those targets. Dynamo's native model-metadata cache
+ignores `XDG_CACHE_HOME`, so only `$HOME/.cache/dynamo/mdc` receives a private
+scratch bind mount inside the test container. The account's real home is not
+mounted, `HOME` is unchanged, and the image and pinned model snapshot stay
+read-only during testing.
+
+This single-node lane binds Dynamo's HTTP, system, request, response and event
+interfaces to loopback. Listener evidence covers the five named service ports
+and every TCP listener owned by the frontend and worker system-endpoint PIDs.
+It does not claim to inventory unrelated engine subprocess sockets.
 
 ## Status, reconnect, and cleanup
 

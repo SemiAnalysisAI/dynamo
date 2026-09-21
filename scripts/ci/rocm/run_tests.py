@@ -37,6 +37,10 @@ def main():
         DYNAMO_CI_SERVICE_HOST="127.0.0.1",
         DYN_HTTP_HOST="127.0.0.1",
         DYN_SYSTEM_HOST="127.0.0.1",
+        # All cooperating Dynamo services share this one-node allocation.
+        DYN_TCP_RPC_HOST="127.0.0.1",
+        DYN_TCP_RESPONSE_STREAM_HOST="127.0.0.1",
+        DYN_EVENT_PLANE_HOST="127.0.0.1",
     )
     contract = json.loads(Path(__file__).with_name("contract.json").read_text())
     request = json.loads((result / "request.json").read_text())

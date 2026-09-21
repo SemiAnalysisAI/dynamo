@@ -246,7 +246,7 @@ COLLECT = r"""
 import io,json,pathlib,sys,tarfile
 run=pathlib.Path(sys.argv[1]); cap=64*1024*1024; total=0; omitted=[]
 names={'request.json','source-manifest.json','build-manifest.json','image-manifest.json',
-'model-manifest.json','allocation.json','completed.json','hip.json','import-origins.json',
+'model-manifest.json','aiter-cache.json','allocation.json','completed.json','hip.json','import-origins.json',
 'test-manifest.json','test-summary.json','contract.json','provenance.json','receipt.json','terminal.json','wait-result.json',
 'controller-result.json','monitor.json','heartbeat.json','cancel.json','scheduler-latest.json',
 'submission-intent.json','partition-selection.json','collection.txt','environment.json','wheel-manifest.json',

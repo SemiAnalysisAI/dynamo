@@ -48,6 +48,31 @@ def owned_listeners(root_pid, expected_ports):
     return records
 
 
+def service_listeners(services):
+    """Inspect every listener on the PIDs owning the two proven service ports."""
+    records = []
+    for pid in sorted({entry["pid"] for entry in services}):
+        anchors = [entry for entry in services if entry["pid"] == pid]
+        process = psutil.Process(pid)
+        created = process.create_time()
+        if any(entry["process_created_at"] != created for entry in anchors):
+            raise ValueError("Dynamo service PID was reused during listener capture")
+        for connection in process.net_connections(kind="tcp"):
+            if connection.status == psutil.CONN_LISTEN:
+                records.append(
+                    {
+                        "pid": pid,
+                        "process_created_at": created,
+                        "root_pid": anchors[0]["root_pid"],
+                        "captured_at": time.time(),
+                        "service_roles": sorted({entry["role"] for entry in anchors}),
+                        "port": connection.laddr.port,
+                        "address": connection.laddr.ip,
+                    }
+                )
+    return records
+
+
 def main():
     suite, directory = sys.argv[1:]
     result = Path(directory)
@@ -123,6 +148,7 @@ def main():
                     for entry in evidence["listeners"]
                     if entry["role"] not in ("frontend", "system")
                 ] + services
+                evidence["service_listeners"] = service_listeners(services)
                 evidence["status"] = "passed"
                 atomic_json(path, evidence)
                 verify_listener_evidence(

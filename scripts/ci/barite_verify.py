@@ -361,6 +361,53 @@ def verify_listener_evidence(evidence, request, suite, job_id, started_at):
             and entry["captured_at"] >= started_at,
             "stale or invalid listener process",
         )
+    anchors = [
+        entry
+        for entry in evidence["listeners"]
+        if entry["role"] in ("frontend", "system")
+    ]
+    expanded = evidence["service_listeners"]
+    require(
+        {entry["pid"] for entry in expanded} == {entry["pid"] for entry in anchors},
+        "Dynamo service listener inventory incomplete",
+    )
+    for entry in expanded:
+        owners = [anchor for anchor in anchors if anchor["pid"] == entry["pid"]]
+        require(
+            entry["service_roles"] == sorted({anchor["role"] for anchor in owners}),
+            "Dynamo service listener owner mismatch",
+        )
+        require(
+            all(
+                entry["process_created_at"] == anchor["process_created_at"]
+                and entry["root_pid"] == anchor["root_pid"]
+                for anchor in owners
+            ),
+            "Dynamo service listener process identity mismatch",
+        )
+        require(
+            entry["captured_at"] >= started_at
+            and entry["captured_at"] >= entry["process_created_at"],
+            "stale Dynamo service listener",
+        )
+        require(
+            isinstance(entry["port"], int) and 0 < entry["port"] < 65536,
+            "invalid Dynamo service listener port",
+        )
+        require(
+            ipaddress.ip_address(entry["address"]).is_loopback,
+            f"non-loopback Dynamo service listener: {entry['address']}:{entry['port']}",
+        )
+    for anchor in anchors:
+        require(
+            any(
+                entry["pid"] == anchor["pid"]
+                and entry["port"] == anchor["port"]
+                and entry["address"] == anchor["address"]
+                for entry in expanded
+            ),
+            "named endpoint missing from Dynamo service listener inventory",
+        )
     return evidence
 
 

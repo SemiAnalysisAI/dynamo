@@ -236,10 +236,15 @@ PY
 )
 MODEL_CACHE="$ROOT/models/$MODEL_KEY"
 [[ -d "$MODEL_CACHE" ]]
+# Native MDC caching ignores XDG_CACHE_HOME. Bind only its cache directory;
+# preserve HOME and keep the user's actual home outside the container.
+[[ "${HOME:?}" =~ ^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$ ]]
+[[ "/$HOME/" != *"/../"* && "/$HOME/" != *"/./"* ]]
+mkdir -p "$scratch/mdc-cache"
 export HF_HOME=/models HF_HUB_CACHE=/models/hub HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 run_step "${COMMON[@]}" --container-image="$TEST_SQSH" \
     --container-env=ROCR_VISIBLE_DEVICES,HF_HOME,HF_HUB_CACHE,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE \
-    --container-mounts="$JOB_SOURCE:/workspace,$RUN_DIR:/results,$MODEL_CACHE:/models:ro" \
+    --container-mounts="$JOB_SOURCE:/workspace,$RUN_DIR:/results,$MODEL_CACHE:/models:ro,$scratch/mdc-cache:$HOME/.cache/dynamo/mdc" \
     --container-workdir=/workspace \
     bash /results/controller/rocm/run-tests.sh --suite aggregate --python /opt/dynamo/venv/bin/python3 --results /results
 python3 "$CONTROLLER/barite_verify.py" workload --run-dir "$RUN_DIR" --runtime-dir "$RUN_DIR" --output "$RUN_DIR/completed.json"
