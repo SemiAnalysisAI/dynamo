@@ -10,6 +10,7 @@ import hashlib
 import importlib
 import importlib.metadata
 import io
+import ipaddress
 import json
 import os
 import shutil
@@ -323,6 +324,46 @@ def verify_junit(path, expected, started_at):
     return {"sha256": sha256_file(path), "cases": actual}
 
 
+def verify_listener_evidence(evidence, request, suite, job_id, started_at):
+    """Validate the small, role-scoped listener snapshot, also on the client."""
+    roles = {"nats", "etcd_client", "etcd_peer", "frontend", "system"}
+    require(evidence["status"] == "passed", "listener capture incomplete")
+    require(
+        evidence["run_key"] == request["run_key"]
+        and evidence["source_sha"] == request["source_sha"]
+        and evidence["suite"] == suite
+        and str(evidence["job_id"]) == str(job_id),
+        "listener evidence identity mismatch",
+    )
+    ports = evidence["expected_ports"]
+    require(
+        set(ports) == roles and len(set(ports.values())) == len(roles),
+        "listener roles/ports incomplete",
+    )
+    require(
+        all(isinstance(port, int) and 0 < port < 65536 for port in ports.values()),
+        "invalid listener port",
+    )
+    require(
+        {entry["role"] for entry in evidence["listeners"]} == roles,
+        "required listener was not observed",
+    )
+    for entry in evidence["listeners"]:
+        require(entry["port"] == ports[entry["role"]], "listener port mismatch")
+        require(
+            ipaddress.ip_address(entry["address"]).is_loopback,
+            f"non-loopback {entry['role']} listener: {entry['address']}",
+        )
+        require(
+            entry["pid"] > 0
+            and entry["root_pid"] > 0
+            and 0 < entry["process_created_at"] <= entry["captured_at"]
+            and entry["captured_at"] >= started_at,
+            "stale or invalid listener process",
+        )
+    return evidence
+
+
 def workload(request, runtime_dir, job_id=None):
     contract = read_json(runtime_dir / "contract.json")
     trusted_path = Path(__file__).resolve().parent / "rocm" / "contract.json"
@@ -408,6 +449,14 @@ def workload(request, runtime_dir, job_id=None):
         image["build"]["contract_sha256"] == sha256_file(trusted_path),
         "image test contract mismatch",
     )
+    listener_evidence = {}
+    current_job = str(job_id) if job_id is not None else os.environ["SLURM_JOB_ID"]
+    for suite in ("frontend", "aggregate"):
+        path = runtime_dir / f"{suite}-listeners.json"
+        observed = verify_listener_evidence(
+            read_json(path), request, suite, current_job, contract["started_at"]
+        )
+        listener_evidence[suite] = {"sha256": sha256_file(path), **observed}
     collections = {}
     required_plugins = {entry[0] for entry in image["build"]["pytest_plugins"]}
     for name, nodes in trusted["suites"].items():
@@ -439,6 +488,7 @@ def workload(request, runtime_dir, job_id=None):
         "model_manifest_sha256": model_hash,
         "junit": junit,
         "collections": collections,
+        "listeners": listener_evidence,
         "evidence": evidence,
         "completed_at": time.time(),
     }

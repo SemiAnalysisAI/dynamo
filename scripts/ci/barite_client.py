@@ -250,7 +250,8 @@ names={'request.json','source-manifest.json','build-manifest.json','image-manife
 'test-manifest.json','test-summary.json','contract.json','provenance.json','receipt.json','terminal.json','wait-result.json',
 'controller-result.json','monitor.json','heartbeat.json','cancel.json','scheduler-latest.json',
 'submission-intent.json','collection.txt','environment.json','wheel-manifest.json',
-'imports-collection.json','frontend-collection.json','aggregate-collection.json'}
+'imports-collection.json','frontend-collection.json','aggregate-collection.json',
+'frontend-listeners.json','aggregate-listeners.json'}
 with tarfile.open(fileobj=sys.stdout.buffer,mode='w|') as archive:
     for path in sorted(run.rglob('*')):
         relative=path.relative_to(run)

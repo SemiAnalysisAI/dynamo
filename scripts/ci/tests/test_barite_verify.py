@@ -176,6 +176,102 @@ class VerifyTests(unittest.TestCase):
         ):
             verify.provenance(self.request, build)
 
+    def listener_evidence(self, suite="frontend"):
+        ports = {
+            name: 10000 + index
+            for index, name in enumerate(
+                ("nats", "etcd_client", "etcd_peer", "frontend", "system")
+            )
+        }
+        return {
+            "status": "passed",
+            "run_key": self.request["run_key"],
+            "source_sha": self.request["source_sha"],
+            "job_id": "123",
+            "suite": suite,
+            "expected_ports": ports,
+            "listeners": [
+                {
+                    "role": role,
+                    "port": port,
+                    "address": "127.0.0.1",
+                    "pid": 10,
+                    "root_pid": 9,
+                    "process_created_at": 1,
+                    "captured_at": 2,
+                }
+                for role, port in ports.items()
+            ],
+        }
+
+    def test_listener_gate_rejects_missing_wildcard_stale_and_wrong_run(self):
+        valid = self.listener_evidence()
+        verify.verify_listener_evidence(valid, self.request, "frontend", "123", 0)
+        for fault in ("missing", "wildcard", "stale", "identity", "extra"):
+            evidence = self.listener_evidence()
+            if fault == "missing":
+                evidence["listeners"].pop()
+            elif fault == "wildcard":
+                evidence["listeners"][0]["address"] = "0.0.0.0"
+            elif fault == "stale":
+                evidence["listeners"][0]["captured_at"] = 0
+            elif fault == "identity":
+                evidence["job_id"] = "other"
+            else:
+                evidence["listeners"].append(
+                    {**evidence["listeners"][0], "address": "::"}
+                )
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                verify.verify_listener_evidence(
+                    evidence, self.request, "frontend", "123", 1
+                )
+
+    def test_owned_listener_capture_filters_unrelated_ports(self):
+        source = Path(verify.__file__).parent / "rocm/pytest_driver.py"
+        tree = ast.parse(source.read_text())
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "owned_listeners"
+        )
+
+        def connection(port, status="LISTEN"):
+            return SimpleNamespace(
+                status=status, laddr=SimpleNamespace(port=port, ip="127.0.0.1")
+            )
+
+        child = SimpleNamespace(
+            pid=11,
+            create_time=lambda: 1,
+            net_connections=lambda **_: [
+                connection(9999),
+                connection(1234),
+                connection(1234, "ESTABLISHED"),
+            ],
+        )
+        root = SimpleNamespace(
+            pid=10,
+            create_time=lambda: 1,
+            children=lambda **_: [child],
+            net_connections=lambda **_: [],
+        )
+        namespace = {
+            "psutil": SimpleNamespace(
+                Process=lambda pid: root,
+                CONN_LISTEN="LISTEN",
+                NoSuchProcess=ProcessLookupError,
+                ZombieProcess=ProcessLookupError,
+            ),
+            "time": SimpleNamespace(time=lambda: 2),
+        }
+        exec(  # noqa: S102 -- execute the trusted capture helper only
+            compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"),
+            namespace,
+        )
+        records = namespace["owned_listeners"](10, {"frontend": 1234})
+        self.assertEqual(len(records), 1)
+        self.assertEqual((records[0]["pid"], records[0]["port"]), (11, 1234))
+
     def test_workload_requires_all_frozen_cases_and_current_run(self):
         trusted_path = Path(verify.__file__).parent / "rocm/contract.json"
         trusted = verify.read_json(trusted_path)
@@ -245,6 +341,10 @@ class VerifyTests(unittest.TestCase):
         )
         (self.root / "test-results").mkdir()
         for name, cases in suites.items():
+            if name != "imports":
+                atomic_json(
+                    self.root / f"{name}-listeners.json", self.listener_evidence(name)
+                )
             atomic_json(
                 self.root / f"{name}-collection.json",
                 {"nodeids": trusted["suites"][name], "plugins": ["xdist", "python"]},
