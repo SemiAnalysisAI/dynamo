@@ -81,6 +81,12 @@ class VerifyTests(unittest.TestCase):
                     verify.extract_source(self.root, self.root / "source")
                 self.assertFalse((self.root / "source").exists())
 
+    def test_symlink_chain_cannot_escape_source(self):
+        self.archive([("alias", b".", True), ("escape", b"alias/../outside", True)])
+        with self.assertRaisesRegex(ValueError, "escaping symlink chain"):
+            verify.extract_source(self.root, self.root / "source")
+        self.assertFalse((self.root / "outside").exists())
+
     def test_source_manifest_mismatch(self):
         self.archive([("file", b"abc", False)])
         manifest = verify.read_json(self.root / "source-manifest.json")

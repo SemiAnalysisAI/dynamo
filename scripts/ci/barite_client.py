@@ -365,6 +365,10 @@ def verdict(output):
 
 def wait_for_run(connection, remote_run, output, timeout):
     deadline = time.monotonic() + timeout
+    if connection.deadline is not None:
+        deadline = min(deadline, connection.deadline)
+    # One deadline bounds retries, sleeps, status calls, and final collection.
+    connection.deadline = deadline
     previous = None
     last_collection = time.monotonic()
     while time.monotonic() < deadline:
@@ -418,6 +422,7 @@ def start_run(args, connection, info):
             "remote_run": remote_run,
             "ssh_host": args.ssh_host,
             "started_at": time.time(),
+            "deadline_at": time.time() + max(0, connection.deadline - time.monotonic()),
         },
     )
     print(f"Run {args.run_key}; evidence {output}; remote {remote_run}", flush=True)
@@ -583,6 +588,10 @@ def main():
         connection.deadline = time.monotonic() + 17100
     elif args.action == "finalize":
         connection.deadline = time.monotonic() + args.deadline_seconds
+    elif args.action == "resume":
+        saved = read_json(output / "client.json")
+        expires = saved.get("deadline_at", saved["started_at"] + 17100)
+        connection.deadline = time.monotonic() + max(0, expires - time.time())
     info = preflight(connection, args)
     remote_run = str(PurePosixPath(info["root"]) / "runs" / args.run_key)
     if args.action == "run":
@@ -607,8 +616,7 @@ def main():
         if args.action == "finalize":
             collect(connection, remote_run, output, timeout=60)
     if args.action == "resume":
-        client = read_json(output / "client.json")
-        remaining = max(0, 17100 - (time.time() - client["started_at"]))
+        remaining = max(0, connection.deadline - time.monotonic())
         wait_for_run(connection, remote_run, output, remaining)
 
 

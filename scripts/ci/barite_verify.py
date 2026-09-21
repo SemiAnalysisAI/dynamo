@@ -125,6 +125,11 @@ def extract_source(run_dir, destination):
                 with handle.extractfile(member) as source, path.open("xb") as target:
                     shutil.copyfileobj(source, target)
                 path.chmod(member.mode & 0o777)
+        for link in links:
+            require(
+                (destination / link).resolve().is_relative_to(destination.resolve()),
+                "escaping symlink chain",
+            )
 
 
 def wheel_record(path):

@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import barite_client as client
@@ -226,8 +226,43 @@ class ClientTests(unittest.TestCase):
             patch.object(client, "verdict") as verdict,
         ):
             with self.assertRaises(TimeoutError):
-                client.wait_for_run(Mock(), "/run", self.root, 1)
+                client.wait_for_run(
+                    SimpleNamespace(deadline=None), "/run", self.root, 1
+                )
             verdict.assert_not_called()
+
+    def test_wait_does_not_reset_deadline_consumed_by_staging(self):
+        connection = SimpleNamespace(deadline=10)
+        with (
+            patch.object(client.time, "monotonic", return_value=11),
+            patch.object(client, "remote_action") as action,
+            patch.object(client.time, "sleep") as sleep,
+            self.assertRaisesRegex(TimeoutError, "Client deadline"),
+        ):
+            client.wait_for_run(connection, "/run", self.root, 17100)
+        action.assert_not_called()
+        sleep.assert_not_called()
+        self.assertEqual(connection.deadline, 10)
+
+    def test_retry_sleep_stays_inside_original_deadline(self):
+        connection = SimpleNamespace(deadline=12)
+        now = [10.0]
+
+        def advance(seconds):
+            now[0] += seconds
+
+        with (
+            patch.object(client.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(
+                client, "remote_action", side_effect=TimeoutError("SSH timed out")
+            ) as action,
+            patch.object(client.time, "sleep", side_effect=advance) as sleep,
+            self.assertRaisesRegex(TimeoutError, "Client deadline"),
+        ):
+            client.wait_for_run(connection, "/run", self.root, 17100)
+        action.assert_called_once()
+        sleep.assert_called_once_with(2)
+        self.assertEqual(connection.deadline, 12)
 
     def test_collector_rejects_path_traversal(self):
         class FakeConnection:
