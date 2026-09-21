@@ -134,6 +134,43 @@ container/run.sh --image dynamo:latest-sglang-xpu-runtime --device=xpu -it
 docker build -f container/Dockerfile.test --build-arg BASE_IMAGE=dynamo:latest-vllm-runtime -t dynamo:latest-vllm-test .
 ```
 
+#### ROCm runtime and test images
+
+The initial ROCm target supports vLLM on `linux/amd64` for single-node aggregate
+serving. It builds Dynamo's native bindings and Python wheels from this checkout
+on a digest-pinned upstream ROCm base. It installs them in
+`/opt/dynamo/venv` with access to the base's Python packages, preserving the
+inherited Torch/vLLM versions and module origins. Both dependency installation
+steps enforce the same accelerator constraints and run `pip check`.
+
+```bash
+python3 container/render.py --framework vllm --device rocm --target runtime \
+  --platform linux/amd64 --output-short-filename
+docker build --platform linux/amd64 -f container/rendered.Dockerfile \
+  --build-arg DYNAMO_COMMIT_SHA="$(git rev-parse HEAD)" \
+  -t dynamo:local-vllm-rocm-runtime .
+docker run --rm dynamo:local-vllm-rocm-runtime \
+  python3 /workspace/dev/sanity_check.py --runtime-check --no-gpu-check
+docker build --platform linux/amd64 -f container/Dockerfile.test \
+  --target test_image --build-arg BASE_IMAGE=dynamo:local-vllm-rocm-runtime \
+  -t dynamo:local-vllm-rocm-test .
+```
+
+The build and installation check do not require GPU access. GPU tests need a
+ROCm host with the allocated devices exposed to the container; the Slurm CI path
+is documented in [scripts/ci/README.md](../scripts/ci/README.md). `run.sh` does not
+currently configure ROCm devices. This target does not qualify native NIXL,
+disaggregated serving, KVBM, GPU memory service, or media extensions. It has no
+release publishing or compliance stage, and its image-local native wheels are
+not portable manylinux release artifacts. Other frameworks, development
+targets, ARM64, and EFA are rejected by the renderer.
+
+Run its renderer and stack-preservation tests with Jinja2 and PyYAML installed:
+
+```bash
+python3 -m unittest discover -s container/tests -p 'test_*.py'
+```
+
 ### 3. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
 ```bash
 run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev ...

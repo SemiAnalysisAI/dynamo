@@ -7,14 +7,14 @@
 ########## Base Image ############
 ##################################
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dynamo_base
+FROM ${BASE_IMAGE}{% if device != "rocm" %}:${BASE_IMAGE_TAG}{% endif %} AS dynamo_base
 
 ARG TARGETARCH
 
 USER root
 WORKDIR /opt/dynamo
 
-{% if device == "cpu" %}
+{% if device in ("cpu", "rocm") %}
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
     curl ca-certificates zip unzip git lsb-release numactl wget vim

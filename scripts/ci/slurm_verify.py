@@ -13,6 +13,7 @@ import io
 import ipaddress
 import json
 import os
+import re
 import shutil
 import sys
 import tarfile
@@ -174,6 +175,7 @@ def build_manifest(request, spec):
         and spec.get("model") == trusted["model"],
         "build base/model mismatch",
     )
+    verify_image_build(spec.get("image_build"))
     wheels = []
     for item in spec["wheels"]:
         path = Path(item["path"])
@@ -200,12 +202,72 @@ def build_manifest(request, spec):
     }
 
 
+def verify_image_build(evidence):
+    """Require both official Docker stages and a successful runtime sanity run."""
+    require(isinstance(evidence, dict), "missing image build evidence")
+    require(evidence.get("platform") == "linux/amd64", "unsupported image platform")
+    for key in ("runtime_dockerfile_sha256", "test_dockerfile_sha256"):
+        value = evidence.get(key)
+        require(
+            isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value),
+            f"invalid image build {key}",
+        )
+    for key in ("runtime_image_id", "test_image_id"):
+        value = evidence.get(key)
+        require(
+            isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value),
+            f"invalid image build {key}",
+        )
+    require(
+        evidence["runtime_image_id"] != evidence["test_image_id"],
+        "runtime and test image identities must differ",
+    )
+    sanity = evidence.get("runtime_sanity")
+    require(isinstance(sanity, dict), "missing runtime sanity evidence")
+    require(sanity.get("status") == "passed", "runtime sanity did not pass")
+    require(
+        sanity.get("image_id") == evidence["runtime_image_id"],
+        "runtime sanity image mismatch",
+    )
+    checks = sanity.get("checks")
+    require(isinstance(checks, dict), "missing runtime sanity checks")
+    require(
+        {"sanity_check", "pip_check"}.issubset(checks),
+        "missing required runtime sanity checks",
+    )
+    for name, code in checks.items():
+        require(
+            type(code) is int and code == 0,
+            f"runtime {name} did not pass",
+        )
+
+
 def verify_build(manifest, request):
     match_identity(manifest, request)
     require(
         manifest.get("status") == "passed" and manifest.get("wheels"),
         "build did not pass",
     )
+    verify_image_build(manifest.get("image_build"))
+
+
+def build_from_image(request, manifest):
+    """Validate an external image envelope before trusting its build metadata."""
+    match_identity(manifest, request)
+    require(manifest.get("status") == "passed", "image not published successfully")
+    digest = manifest.get("sqsh_sha256")
+    require(
+        isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest),
+        "invalid image digest",
+    )
+    require(
+        not request.get("reuse_image_sha") or digest == request["reuse_image_sha"],
+        "reuse image mismatch",
+    )
+    build = manifest.get("build")
+    require(isinstance(build, dict), "missing image build manifest")
+    verify_build(build, request)
+    return build
 
 
 def image_manifest(request, image, build):
@@ -220,15 +282,9 @@ def image_manifest(request, image, build):
 
 
 def verify_image(request, image, manifest):
-    match_identity(manifest, request)
-    require(manifest.get("status") == "passed", "image not published successfully")
+    build_from_image(request, manifest)
     actual = sha256_file(image)
     require(actual == manifest["sqsh_sha256"], "image hash mismatch")
-    require(
-        not request.get("reuse_image_sha") or actual == request["reuse_image_sha"],
-        "reuse image mismatch",
-    )
-    verify_build(manifest["build"], request)
     return manifest
 
 
@@ -484,9 +540,7 @@ def workload(request, runtime_dir, job_id=None):
         "stale provenance",
     )
     image = read_json(runtime_dir / "image-manifest.json")
-    match_identity(image, request)
-    require(image.get("status") == "passed", "image was not published successfully")
-    verify_build(image["build"], request)
+    build_from_image(request, image)
     require(
         evidence["provenance"].get("build_manifest_sha256")
         == sha256_json(image["build"]),
@@ -595,7 +649,16 @@ def main():
     elif args.command == "verify-image":
         result = verify_image(request, args.image, read_json(args.manifest))
     elif args.command == "provenance":
-        result = provenance(request, read_json(args.build_manifest))
+        require(
+            bool(args.manifest) != bool(args.build_manifest),
+            "provenance requires exactly one of --manifest or --build-manifest",
+        )
+        build = (
+            build_from_image(request, read_json(args.manifest))
+            if args.manifest
+            else read_json(args.build_manifest)
+        )
+        result = provenance(request, build)
     elif args.command == "workload":
         result = workload(request, args.runtime_dir or args.run_dir)
     elif args.command == "verify-collected":

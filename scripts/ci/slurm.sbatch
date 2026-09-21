@@ -69,33 +69,18 @@ scratch=$(mktemp -d "/tmp/dynamo-rocm-${SLURM_JOB_ID}-XXXXXXXX")
 mkdir -p "$ROOT/images" "$ROOT/models"
 python3 "$CONTROLLER/slurm_verify.py" extract --run-dir "$RUN_DIR" --destination "$scratch/source"
 JOB_SOURCE="$scratch/source"
-read_identity() {
-    python3 - "$RUN_DIR/request.json" <<'PY'
+REUSE_SHA=$(python3 - "$RUN_DIR/request.json" <<'PYTHON'
 import json,sys
 from pathlib import Path
-run = Path(sys.argv[1]).parent
-request = json.loads((run / 'request.json').read_text())
-contract = json.loads((run / 'controller/rocm/contract.json').read_text())
-print(request['source_sha'])
-print(request['archive_sha256'])
-print(request.get('reuse_image_sha') or '')
-print(contract['base_uri'])
-PY
-}
-mapfile -t identity < <(read_identity)
-SOURCE_SHA=${identity[0]}
-ARCHIVE_SHA=${identity[1]}
-REUSE_SHA=${identity[2]:-}
-BASE_URI=${identity[3]}
+print(json.loads(Path(sys.argv[1]).read_text()).get('reuse_image_sha') or '')
+PYTHON
+)
 COMMON=(srun --ntasks=1 --cpu-bind=cores --kill-on-bad-exit=1 --no-container-mount-home --no-container-entrypoint)
 if [[ -z "$REUSE_SHA" ]]; then
     BUILD_SQSH="$RUN_DIR/dynamo-test.building.sqsh"
     [[ ! -e "$BUILD_SQSH" ]]
-    run_step "${COMMON[@]}" --container-image="$BASE_URI" --container-remap-root --container-writable \
-        --container-env=ROCR_VISIBLE_DEVICES --container-mounts="$JOB_SOURCE:/workspace,$RUN_DIR:/results" \
-        --container-workdir=/workspace --container-save="$BUILD_SQSH" \
-        bash /results/controller/rocm/install-source.sh --source-sha "$SOURCE_SHA" \
-        --archive-sha256 "$ARCHIVE_SHA" --base-uri "$BASE_URI" --manifest /results/build-manifest.json
+    run_step python3 "$CONTROLLER/rocm/build_images.py" \
+        --source "$JOB_SOURCE" --results "$RUN_DIR" --scratch "$scratch"
     [[ -s "$BUILD_SQSH" ]]
     python3 "$CONTROLLER/slurm_verify.py" image-manifest --run-dir "$RUN_DIR" --image "$BUILD_SQSH" \
         --build-manifest "$RUN_DIR/build-manifest.json" --output "$RUN_DIR/image-manifest.json"
@@ -149,7 +134,7 @@ MODEL_CACHE="$ROOT/models/$MODEL_KEY"
 mkdir -p "$scratch/mdc-cache"
 export HF_HOME=/models HF_HUB_CACHE=/models/hub HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 run_step "${COMMON[@]}" --container-image="$TEST_SQSH" \
-    --container-env=ROCR_VISIBLE_DEVICES,HF_HOME,HF_HUB_CACHE,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE \
+    --container-env=HOME,ROCR_VISIBLE_DEVICES,HF_HOME,HF_HUB_CACHE,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE \
     --container-mounts="$JOB_SOURCE:/workspace,$RUN_DIR:/results,$MODEL_CACHE:/models:ro,$scratch/mdc-cache:$HOME/.cache/dynamo/mdc" \
     --container-workdir=/workspace \
     bash /results/controller/rocm/run-tests.sh --suite aggregate --python /opt/dynamo/venv/bin/python3 --results /results

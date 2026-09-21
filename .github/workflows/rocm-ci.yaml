@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/rocm-ci.yaml'
+      - 'container/**'
       - 'scripts/ci/**'
       - 'tests/conftest.py'
   workflow_dispatch:
@@ -38,11 +39,17 @@ jobs:
       - name: Run dependency-free controller tests
         shell: bash
         run: python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
+      - name: Validate ROCm Dockerfile rendering
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/rocm-render-tests"
+          "$RUNNER_TEMP/rocm-render-tests/bin/python" -m pip install Jinja2==3.1.6 PyYAML==6.0.3
+          "$RUNNER_TEMP/rocm-render-tests/bin/python" -m unittest discover -s container/tests -p 'test_*.py' -v
       - name: Check shell syntax
         shell: bash
         run: |
           for script in scripts/ci/slurm-client.sh scripts/ci/slurm.sbatch \
-            scripts/ci/rocm/install-source.sh scripts/ci/rocm/run-tests.sh; do
+            scripts/ci/rocm/run-tests.sh; do
             bash -n "$script"
           done
   aggregate:

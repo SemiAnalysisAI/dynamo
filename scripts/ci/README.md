@@ -5,22 +5,27 @@ SPDX-License-Identifier: Apache-2.0
 
 # ROCm CI on Slurm
 
-This optional lane builds reviewed Dynamo source and runs one-GPU smoke tests in
-a Slurm allocation using Pyxis/Enroot. SSH connects to a login host for staging and
-scheduler control; builds and tests run on compute nodes. The same client drives
-local qualification and the manual GitHub Actions workflow.
+This optional lane builds Dynamo's rendered ROCm runtime Docker image, layers the
+standard test image on top, and runs one-GPU smoke tests through Pyxis/Enroot.
+SSH connects to a login host for staging and scheduler control; builds and tests
+run in a Slurm allocation on compute nodes. The same client drives local
+qualification and the manual GitHub Actions workflow.
 
-Pull requests changing this lane run dependency-free controller tests and shell
-syntax checks on a GitHub-hosted runner. They do not receive cluster credentials.
-GPU jobs require an explicit workflow dispatch and the protected environment;
-they run only after the offline checks pass.
+Pull requests changing this lane or the container sources run dependency-free
+controller tests, Dockerfile rendering tests, and shell syntax checks on a
+GitHub-hosted runner. Rendering tests install Jinja2 and PyYAML in a separate
+environment. These jobs do not receive cluster credentials. GPU jobs require an
+explicit workflow dispatch and the protected environment, after offline checks
+pass.
 
 ## Requirements and configuration
 
 - Client: Python 3.12 or newer, Git with Git LFS, and OpenSSH.
 - Cluster: Python 3.12 or newer, Slurm commands, `stdbuf`, shared home storage,
-  Pyxis/Enroot, and an MI300X-compatible ROCm environment. Compute nodes need
-  access to the pinned registry, dependency endpoints, and public model revision.
+  Pyxis/Enroot, and an MI300X-compatible ROCm environment. Compute nodes also need
+  Docker client/daemon binaries, containerd 2.x, Enroot's `dockerd://` import support, and
+  noninteractive `sudo` for a private rootful Docker daemon. They need access to
+  the pinned registry, dependency endpoints, and public model revision.
 - Verify Slurm device enforcement before sharing nodes. The lane checks cgroup
   device isolation and GPU resource configuration; a GPU visibility mask alone
   does not provide device isolation.
@@ -105,10 +110,33 @@ client are limited to 285 minutes; Actions allows 330 minutes for recovery and
 artifact upload. The workflow serializes Actions campaigns; local runs are
 scheduled independently.
 
-The batch job extracts verified source into node-local scratch, builds installed
-wheels, publishes a hashed SQSH image and model snapshot, then tests in a fresh
-container. Images and model snapshots remain read-only during tests. Runtime
-caches use private scratch, including AITER's JIT cache and Dynamo's native
+The batch job extracts verified source into node-local scratch and builds two
+images using Docker's BuildKit engine and a pinned Buildx plugin:
+
+1. Render `container/render.py --framework vllm --device rocm --target runtime`
+   for `linux/amd64`, then build the runtime Dockerfile.
+2. Run `dev/sanity_check.py --runtime-check --no-gpu-check` and `pip check` in
+   that runtime image before adding test dependencies.
+3. Build `container/Dockerfile.test`'s `test_image` target with the runtime image
+   as `BASE_IMAGE`.
+4. Import the resulting test image directly from the private Docker daemon with
+   Enroot, hash the SQSH, and publish it for Pyxis execution.
+
+Docker and containerd use private sockets and storage for each allocation. The cgroup parent
+keeps builds inside the Slurm resource allocation; cleanup stops the private
+daemon. The lane uses no shared host Docker socket and runs no compiler on the
+login host. Runtime and test builds are ordinary repository Docker builds;
+test execution installs no additional packages.
+
+`image-build.json` records both Dockerfile hashes, both local OCI image config
+digests, and the runtime sanity results. The collected Dockerfiles and
+`runtime-image-inspect.json` / `test-image-inspect.json` preserve the build inputs
+and image metadata. `image-manifest.json` binds this evidence and installed wheel
+provenance to the source, controller, and final SQSH identities.
+
+The test job prepares the pinned model snapshot and starts a fresh container.
+Images and model snapshots remain read-only during tests. Runtime caches use
+private scratch, including AITER's JIT cache and Dynamo's native
 `$HOME/.cache/dynamo/mdc` directory; the host home is not mounted.
 
 The fixed test contract in [`rocm/contract.json`](rocm/contract.json) includes a HIP
@@ -184,7 +212,15 @@ Actions run without `reuse_image_sha` can validate a fresh remote build.
 ```bash
 python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
 for script in scripts/ci/slurm-client.sh scripts/ci/slurm.sbatch \
-  scripts/ci/rocm/install-source.sh scripts/ci/rocm/run-tests.sh; do
+  scripts/ci/rocm/run-tests.sh; do
   bash -n "$script"
 done
+```
+
+Dockerfile rendering tests additionally require Jinja2 and PyYAML in your Python
+environment:
+
+```bash
+python3 -m pip install Jinja2==3.1.6 PyYAML==6.0.3
+python3 -m unittest discover -s container/tests -p 'test_*.py' -v
 ```

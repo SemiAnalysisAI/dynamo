@@ -16,7 +16,7 @@ import pytest
 # The trusted controller is mounted outside Python site-packages.
 sys.path.insert(0, "/results/controller")
 from slurm_common import atomic_json
-from slurm_verify import provenance, require, verify_listener_evidence
+from slurm_verify import build_from_image, provenance, require, verify_listener_evidence
 
 
 def owned_listeners(root_pid, expected_ports):
@@ -78,7 +78,9 @@ def main():
     result = Path(directory)
     contract = json.loads(Path(__file__).with_name("contract.json").read_text())
     request = json.loads((result / "request.json").read_text())
-    build = json.loads(Path("/opt/dynamo/ci-manifest.json").read_text())
+    build = build_from_image(
+        request, json.loads((result / "image-manifest.json").read_text())
+    )
     plugins = sorted(
         [e.name, e.value, e.dist.name, e.dist.version]
         for e in metadata.entry_points(group="pytest11")

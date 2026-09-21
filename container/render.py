@@ -73,7 +73,7 @@ def parse_args():
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda", "xpu", "cpu"],
+        choices=["cuda", "xpu", "cpu", "rocm"],
         help="Dockerfile device to use",
     )
 
@@ -125,7 +125,7 @@ def parse_args():
 def validate_args(args):
     valid_inputs = {
         "vllm": {
-            "device": ["cuda", "xpu", "cpu"],
+            "device": ["cuda", "xpu", "cpu", "rocm"],
             "target": [
                 "runtime",
                 "dev",
@@ -181,6 +181,16 @@ def validate_args(args):
             "cuda_version": ["13.0"],
         },
     }
+
+    if args.device == "rocm" and (
+        args.framework != "vllm"
+        or args.target != "runtime"
+        or args.platform != "amd64"
+        or args.make_efa
+    ):
+        raise ValueError(
+            "ROCm currently supports only vllm runtime on linux/amd64 without EFA"
+        )
 
     # Triton's CUDA family is fixed by its release image, so it cannot be chosen
     # by the user: reject an explicitly-passed --cuda-version (detected from argv

@@ -67,8 +67,6 @@ def main():
     files = inventory(Path("/models"))
     files.pop("model-content.json")
     require(files == model_content["files"], "Cached model content mismatch")
-    build = json.loads(Path("/opt/dynamo/ci-manifest.json").read_text())
-    require(build["source_sha"] == request["source_sha"], "Build source mismatch")
     validator = "/results/controller/slurm_verify.py"
     subprocess.run(
         [
@@ -77,8 +75,8 @@ def main():
             "provenance",
             "--run-dir",
             str(result),
-            "--build-manifest",
-            "/opt/dynamo/ci-manifest.json",
+            "--manifest",
+            str(result / "image-manifest.json"),
             "--output",
             str(result / "provenance.json"),
         ],

@@ -3,6 +3,7 @@
 """Pure negative-path checks; no Slurm, network, or accelerator required."""
 
 import ast
+import copy
 import hashlib
 import io
 import json
@@ -31,6 +32,18 @@ class VerifyTests(unittest.TestCase):
             "archive_sha256": "b" * 64,
             "controller_sha": "c" * 40,
             "controller_bundle_sha256": "d" * 64,
+        }
+        self.image_build = {
+            "platform": "linux/amd64",
+            "runtime_dockerfile_sha256": "1" * 64,
+            "test_dockerfile_sha256": "2" * 64,
+            "runtime_image_id": "sha256:" + "3" * 64,
+            "test_image_id": "sha256:" + "4" * 64,
+            "runtime_sanity": {
+                "status": "passed",
+                "image_id": "sha256:" + "3" * 64,
+                "checks": {"sanity_check": 0, "pip_check": 0},
+            },
         }
 
     def archive(self, entries):
@@ -96,7 +109,12 @@ class VerifyTests(unittest.TestCase):
             verify.extract_source(self.root, self.root / "source")
 
     def test_stale_build_and_image_digest(self):
-        build = {**self.request, "status": "passed", "wheels": ["wheel"]}
+        build = {
+            **self.request,
+            "status": "passed",
+            "wheels": ["wheel"],
+            "image_build": self.image_build,
+        }
         image = self.root / "image.sqsh"
         image.write_bytes(b"squashfs")
         manifest = verify.image_manifest(self.request, image, build)
@@ -108,6 +126,119 @@ class VerifyTests(unittest.TestCase):
         image.write_bytes(b"corrupt")
         with self.assertRaisesRegex(ValueError, "image hash mismatch"):
             verify.verify_image(self.request, image, manifest)
+
+    def test_build_requires_official_runtime_and_test_image_evidence(self):
+        build = {
+            **self.request,
+            "status": "passed",
+            "wheels": ["wheel"],
+            "image_build": self.image_build,
+        }
+        verify.verify_build(build, self.request)
+        invalid = []
+        for key in self.image_build:
+            evidence = copy.deepcopy(self.image_build)
+            del evidence[key]
+            invalid.append(evidence)
+        for key, value in (
+            ("platform", "linux/arm64"),
+            ("runtime_dockerfile_sha256", "A" * 64),
+            ("test_dockerfile_sha256", "not-a-digest"),
+            ("runtime_image_id", "runtime:latest"),
+            ("test_image_id", "4" * 64),
+            ("test_image_id", self.image_build["runtime_image_id"]),
+        ):
+            invalid.append({**self.image_build, key: value})
+        for key, value in (("status", "failed"), ("image_id", "sha256:" + "5" * 64)):
+            evidence = copy.deepcopy(self.image_build)
+            evidence["runtime_sanity"][key] = value
+            invalid.append(evidence)
+        for check in ("sanity_check", "pip_check"):
+            for code in (None, 1, False, "0"):
+                evidence = copy.deepcopy(self.image_build)
+                evidence["runtime_sanity"]["checks"][check] = code
+                invalid.append(evidence)
+        evidence = copy.deepcopy(self.image_build)
+        evidence["runtime_sanity"]["checks"]["dynamo_import"] = 1
+        invalid.append(evidence)
+        for evidence in (None, {}, *invalid):
+            with self.subTest(evidence=evidence), self.assertRaises(ValueError):
+                verify.verify_build({**build, "image_build": evidence}, self.request)
+
+        trusted_path = Path(verify.__file__).parent / "rocm/contract.json"
+        trusted = verify.read_json(trusted_path)
+        spec = {
+            **self.request,
+            "contract_sha256": sha256_file(trusted_path),
+            "base_uri": trusted["base_uri"],
+            "model": trusted["model"],
+        }
+        with self.assertRaisesRegex(ValueError, "missing image build evidence"):
+            verify.build_manifest(self.request, spec)
+
+    def test_external_image_envelope_checks_both_identities(self):
+        build = {
+            **self.request,
+            "status": "passed",
+            "wheels": ["wheel"],
+            "image_build": self.image_build,
+        }
+        envelope = {
+            **self.request,
+            "status": "passed",
+            "sqsh_sha256": "e" * 64,
+            "build": build,
+        }
+        self.assertIs(verify.build_from_image(self.request, envelope), build)
+        for key in verify.identity(self.request):
+            with self.subTest(key=key):
+                wrong = copy.deepcopy(envelope)
+                wrong[key] = "0" * len(wrong[key])
+                with self.assertRaisesRegex(ValueError, key + " mismatch"):
+                    verify.build_from_image(self.request, wrong)
+                wrong = copy.deepcopy(envelope)
+                wrong["build"][key] = "0" * len(wrong["build"][key])
+                with self.assertRaisesRegex(ValueError, key + " mismatch"):
+                    verify.build_from_image(self.request, wrong)
+        for field, value in (
+            ("status", "failed"),
+            ("sqsh_sha256", "image:latest"),
+            ("build", None),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                verify.build_from_image(self.request, {**envelope, field: value})
+        with self.assertRaisesRegex(ValueError, "reuse image mismatch"):
+            verify.build_from_image(
+                {**self.request, "reuse_image_sha": "f" * 64}, envelope
+            )
+
+        atomic_json(self.root / "request.json", self.request)
+        atomic_json(self.root / "image-manifest.json", envelope)
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "slurm_verify.py",
+                    "provenance",
+                    "--run-dir",
+                    str(self.root),
+                    "--manifest",
+                    str(self.root / "image-manifest.json"),
+                ],
+            ),
+            patch.object(verify, "provenance") as provenance,
+        ):
+            verify.main()
+            provenance.assert_called_once_with(self.request, build)
+            atomic_json(
+                self.root / "image-manifest.json",
+                {**envelope, "controller_sha": "0" * 40},
+            )
+            provenance.reset_mock()
+            with self.assertRaisesRegex(ValueError, "controller_sha mismatch"):
+                verify.main()
+            provenance.assert_not_called()
 
     def test_junit_empty_skipped_duplicate_failed_and_stale(self):
         path = self.root / "junit.xml"
@@ -130,6 +261,7 @@ class VerifyTests(unittest.TestCase):
         build = {
             **self.request,
             "status": "passed",
+            "image_build": self.image_build,
             "wheels": [
                 {"distribution": "candidate", "modules": ["candidate"], "record": {}}
             ],
@@ -156,6 +288,7 @@ class VerifyTests(unittest.TestCase):
         build = {
             **self.request,
             "status": "passed",
+            "image_build": self.image_build,
             "wheels": [
                 {
                     "distribution": "candidate",
@@ -396,6 +529,7 @@ class VerifyTests(unittest.TestCase):
         build = {
             **self.request,
             "status": "passed",
+            "image_build": self.image_build,
             "wheels": ["wheel"],
             "contract_sha256": sha256_file(trusted_path),
             "pytest_plugins": [["xdist", "xdist.plugin", "pytest-xdist", "3.8.0"]],

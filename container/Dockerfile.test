@@ -25,7 +25,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
     export NETRC=/run/secrets/pypi-netrc \
         UV_NO_CACHE=1 UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     export PIP_CACHE_DIR=/root/.cache/pip && \
-    if [ -n "$VIRTUAL_ENV" ]; then \
+    if [ "${DYNAMO_DEVICE:-}" = "rocm" ]; then \
+        "${VIRTUAL_ENV}/bin/python3" -m pip install \
+            --constraint /opt/dynamo/rocm-constraints.txt \
+            --requirement /opt/dynamo/requirements.rocm.txt \
+            --requirement /tmp/requirements.test.txt vllm && \
+        "${VIRTUAL_ENV}/bin/python3" /opt/dynamo/rocm_stack.py verify && \
+        "${VIRTUAL_ENV}/bin/python3" -m pip check; \
+    elif [ -n "$VIRTUAL_ENV" ]; then \
         uv pip install \
             --requirement /tmp/requirements.test.txt; \
     else \
