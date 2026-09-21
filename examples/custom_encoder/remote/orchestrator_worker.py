@@ -52,6 +52,17 @@ _RAW_MULTIMODAL_FIELDS = (
     "multi_modal_uuids",
     "mm_processor_kwargs",
     "mm_routing_info",
+    "media_io_kwargs",
+)
+_MULTIMODAL_EXTRA_ARG_FIELDS = (
+    "mm_processor_kwargs",
+    "mm_kwargs_shm",
+    "mm_kwargs_nixl",
+    "mm_hashes",
+    "mm_hashes_by_modality",
+    "mm_placeholders",
+    "mm_placeholders_by_modality",
+    "expanded_token_ids",
 )
 
 
@@ -235,8 +246,8 @@ def _with_encoder_result(
     extra_args = request.get("extra_args")
     if isinstance(extra_args, Mapping):
         copied_extra_args = dict(extra_args)
-        copied_extra_args.pop("mm_kwargs_shm", None)
-        copied_extra_args.pop("mm_kwargs_nixl", None)
+        for field_name in _MULTIMODAL_EXTRA_ARG_FIELDS:
+            copied_extra_args.pop(field_name, None)
         request["extra_args"] = copied_extra_args
     return cast(GenerateRequest, request)
 

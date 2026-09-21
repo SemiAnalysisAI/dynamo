@@ -76,7 +76,21 @@ def _request() -> dict[str, Any]:
                 {"Url": "https://example.com/two.png"},
             ]
         },
-        "extra_args": {"mm_kwargs_nixl": {"unused": True}, "keep": 1},
+        "multi_modal_uuids": {"image": ["one", "two"]},
+        "mm_processor_kwargs": {"max_pixels": 1024},
+        "mm_routing_info": {"routing_token_ids": [1, 2, 3]},
+        "media_io_kwargs": {"timeout": 1},
+        "extra_args": {
+            "mm_processor_kwargs": {"max_pixels": 1024},
+            "mm_kwargs_shm": {"unused": True},
+            "mm_kwargs_nixl": {"unused": True},
+            "mm_hashes": ["unused"],
+            "mm_hashes_by_modality": {"image": ["unused"]},
+            "mm_placeholders": [{"offset": 1, "length": 2}],
+            "mm_placeholders_by_modality": {"image": [{"offset": 1, "length": 2}]},
+            "expanded_token_ids": [1, 99, 99, 2, 3],
+            "keep": 1,
+        },
     }
 
 
@@ -110,7 +124,14 @@ async def test_orchestrator_packages_inline_encoder_result() -> None:
     assert raw_client.context is context
     assert raw_client.request is not None
     assert raw_client.request["model"] == "decoder-model"
-    assert "multi_modal_data" not in raw_client.request
+    for field_name in (
+        "multi_modal_data",
+        "multi_modal_uuids",
+        "mm_processor_kwargs",
+        "mm_routing_info",
+        "media_io_kwargs",
+    ):
+        assert field_name not in raw_client.request
     assert raw_client.request["extra_args"] == {"keep": 1}
     assert "encoder_result" not in request
 
