@@ -98,6 +98,17 @@ vllm:
     base_image_tag: 22.04
     runtime_image_tag: v0.29.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
+  rocm:
+    # MI300X qualification image: ROCm 7.2.3 and vLLM 0.29.0. Keep the
+    # digest fixed so runtime/test builds share exactly the same engine stack.
+    base_image: vllm/vllm-openai-rocm@sha256:e5e47f6aaab675c252c381f0dac237b31b10d87bb74d092b07fb4065efd7f5a1
+    runtime_image: vllm/vllm-openai-rocm@sha256:e5e47f6aaab675c252c381f0dac237b31b10d87bb74d092b07fb4065efd7f5a1
+    enable_kvbm: "false"
+    enable_media_ffmpeg: "false"
+    protoc_version: "33.0"
+    protoc_sha256: d99c011b799e9e412064244f0be417e5d76c9b6ace13a2ac735330fa7d57ad8f
+    # Native NIXL and GPU memory service are not yet qualified on this path.
+    # These images are for aggregate-serving qualification, not release publishing.
   vllm_omni_ref: "v0.29.0rc1"
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"

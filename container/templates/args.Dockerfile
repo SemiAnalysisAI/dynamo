@@ -27,14 +27,20 @@ ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
 
 # Base and runtime images configuration
 ARG BASE_IMAGE={{ context[framework][device_key].base_image }}
+{% if device != "rocm" -%}
 ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
+{% endif -%}
 {% if framework in ["sglang", "trtllm", "vllm", "triton"] -%}
 ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
+{% if device != "rocm" -%}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
+{% endif -%}
 {%- endif %}
 
 # wheel builder image selection
-{% if device == "xpu" or device == "cpu" %}
+{% if device == "rocm" %}
+ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}
+{% elif device == "xpu" or device == "cpu" %}
 ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}:${BASE_IMAGE_TAG}
 {% elif platform == "multi" %}
 {# Multi-arch: manylinux selection is handled via --platform-pinned stage aliases   #}
@@ -44,13 +50,13 @@ ARG WHEEL_BUILDER_IMAGE=quay.io/pypa/manylinux_2_28_{{ "x86_64" if platform == "
 {% endif %}
 
 # Build configuration
-ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
+ARG ENABLE_KVBM={{ context[framework][device_key].get("enable_kvbm", context[framework].enable_kvbm) }}
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
 ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
 
-ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
+ARG ENABLE_MEDIA_FFMPEG={{ context[framework][device_key].get("enable_media_ffmpeg", context[framework].enable_media_ffmpeg) }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
 ARG LIBVPX_REF={{ context.dynamo.libvpx_ref }}
 {% if device == "cuda" -%}
