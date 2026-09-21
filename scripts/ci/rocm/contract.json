@@ -12,7 +12,8 @@
     "nats": "v2.14.7",
     "etcd": "v3.5.33",
     "pytest": "9.0.3",
-    "vllm": "0.29.0"
+    "vllm": "0.29.0",
+    "protoc": "33.0"
   },
   "suites": {
     "imports": [
@@ -33,6 +34,7 @@
   "tool_sha256": {
     "rust": "d29ccb1559a177c4e72291f6e5f629de7fe8885e7521ca47802627544b121e95",
     "nats": "e5c20b1cb2c0566b54c544312e91e011f9e130c5c80f16a14f4cf28ef30b8be2",
-    "etcd": "5025b5b24d81a9616b6e284ccd439b9a3df055ef8fdcdc142af3ec8f6a3b3c95"
+    "etcd": "5025b5b24d81a9616b6e284ccd439b9a3df055ef8fdcdc142af3ec8f6a3b3c95",
+    "protoc": "d99c011b799e9e412064244f0be417e5d76c9b6ace13a2ac735330fa7d57ad8f"
   }
 }

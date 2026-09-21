@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import urllib.request
+import zipfile
 from pathlib import Path
 
 import tomllib
@@ -85,7 +86,6 @@ def main():
         "libclang-dev",
         "pkg-config",
         "libssl-dev",
-        "protobuf-compiler",
         "cmake",
         "python3-dev",
         "python3-venv",
@@ -146,6 +146,37 @@ def main():
         "--without=rust-docs",
     )
     shutil.rmtree(extracted)
+    # Ubuntu 22.04 protoc 3.12 cannot compile relay.proto's proto3 optional
+    # fields. Use a pinned compiler plus its matching well-known-type includes.
+    protoc_version = contract["tools"]["protoc"]
+    protoc_zip = PREFIX / f"protoc-{protoc_version}-linux-x86_64.zip"
+    fetch(
+        f"https://github.com/protocolbuffers/protobuf/releases/download/v{protoc_version}/{protoc_zip.name}",
+        protoc_zip,
+    )
+    if (
+        hashlib.sha256(protoc_zip.read_bytes()).hexdigest()
+        != contract["tool_sha256"]["protoc"]
+    ):
+        raise RuntimeError("Pinned protoc archive digest mismatch")
+    protoc_root = PREFIX / "protoc"
+    with zipfile.ZipFile(protoc_zip) as bundle:
+        for member in bundle.namelist():
+            if Path(member).is_absolute() or ".." in Path(member).parts:
+                raise RuntimeError("Invalid protoc archive path")
+        bundle.extractall(protoc_root)
+    protoc_zip.unlink()
+    protoc = protoc_root / "bin/protoc"
+    protoc.chmod(0o755)
+    os.environ["PROTOC"] = str(protoc)
+    os.environ["PROTOC_INCLUDE"] = str(protoc_root / "include")
+    os.environ["PATH"] = str(protoc_root / "bin") + ":" + os.environ["PATH"]
+    actual_protoc = subprocess.check_output(
+        [str(protoc), "--version"], text=True
+    ).strip()
+    if actual_protoc != f"libprotoc {protoc_version}":
+        raise RuntimeError(f"Unexpected protoc version: {actual_protoc}")
+    (args.manifest.parent / "protoc-version.log").write_text(actual_protoc + "\n")
     # Official nixl-sys 1.3.2 fallback builds a dlopen wrapper, not a Python
     # monkeypatch. Missing native NIXL is explicit: transport/KVBM remain unqualified.
     # cudarc 0.19.8 defaults to dynamic loading and accepts this ABI selector;
