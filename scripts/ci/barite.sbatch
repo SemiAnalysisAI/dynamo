@@ -6,6 +6,8 @@ set -euo pipefail
 umask 077
 unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP
 unset PYTEST_ADDOPTS PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD
+# stdbuf belongs to the submitter's streamed JobID receipt, not the workload.
+unset LD_PRELOAD _STDBUF_O _STDBUF_E
 export PYTHONNOUSERSITE=1
 RUN_DIR=${1:?run directory required}
 CONTROLLER="$RUN_DIR/controller"
