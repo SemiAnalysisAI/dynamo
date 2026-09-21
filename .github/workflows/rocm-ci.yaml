@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Offline PR checks and an opt-in GPU lane using the protected workflow commit.
+name: ROCm Slurm CI
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/rocm-ci.yaml'
+      - 'scripts/ci/**'
+      - 'tests/conftest.py'
+  workflow_dispatch:
+    inputs:
+      controller_sha:
+        description: Exact reviewed default-branch workflow/controller commit used locally
+        required: true
+        type: string
+      source_sha:
+        description: Reviewed full candidate SHA reachable from the configured source branch
+        required: true
+        type: string
+      reuse_image_sha:
+        description: Published SQSH SHA256 for parity; empty builds a new image
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: read
+jobs:
+  offline:
+    name: Validate Slurm controllers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run dependency-free controller tests
+        shell: bash
+        run: python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          for script in scripts/ci/slurm-client.sh scripts/ci/slurm.sbatch \
+            scripts/ci/rocm/install-source.sh scripts/ci/rocm/run-tests.sh; do
+            bash -n "$script"
+          done
+  aggregate:
+    needs: offline
+    concurrency:
+      group: rocm-slurm-ci
+      cancel-in-progress: false
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      vars.ROCM_SLURM_ENABLED == 'true' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment: rocm-slurm
+    timeout-minutes: 330
+    env:
+      CONTROLLER_SHA: ${{ inputs.controller_sha }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      REUSE_IMAGE_SHA: ${{ inputs.reuse_image_sha }}
+      SOURCE_BRANCH: ${{ vars.ROCM_SLURM_SOURCE_BRANCH }}
+      SLURM_UID: ${{ vars.SLURM_UID }}
+      PREFERRED_PARTITION: ${{ vars.SLURM_PREFERRED_PARTITION || 'compute-1' }}
+      FALLBACK_PARTITION: ${{ vars.SLURM_FALLBACK_PARTITION || 'compute-0' }}
+      RUN_KEY: gh-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Initialize local evidence before checkout
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/slurm-artifacts"
+          printf '%s\n' "run=$RUN_KEY" "workflow_sha=$GITHUB_SHA" "phase=before-checkout" \
+            > "$RUNNER_TEMP/slurm-artifacts/controller-start.txt"
+      - name: Checkout trusted controller from the workflow commit
+        id: controller_checkout
+        timeout-minutes: 10
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          path: controller
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate reviewed source identity
+        timeout-minutes: 1
+        working-directory: controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CONTROLLER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$CONTROLLER_SHA"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ -z "$REUSE_IMAGE_SHA" || "$REUSE_IMAGE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$SLURM_UID" =~ ^[0-9]+$ ]]
+          test -n "$SOURCE_BRANCH"
+          git check-ref-format "refs/heads/$SOURCE_BRANCH"
+          git show-ref --verify --quiet "refs/remotes/origin/$SOURCE_BRANCH"
+          git cat-file -e "$SOURCE_SHA^{commit}"
+          git merge-base --is-ancestor "$SOURCE_SHA" "refs/remotes/origin/$SOURCE_BRANCH"
+      - name: Materialize candidate files without executing them
+        timeout-minutes: 10
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: candidate
+          lfs: true
+          persist-credentials: false
+      - name: Configure scoped SSH credentials and pinned host keys
+        timeout-minutes: 1
+        working-directory: controller
+        shell: bash
+        env:
+          SLURM_SSH_CONFIG: ${{ vars.SLURM_SSH_CONFIG }}
+          SLURM_SSH_KEY: ${{ secrets.SLURM_SSH_KEY }}
+          SLURM_GATEWAY_SSH_KEY: ${{ secrets.SLURM_GATEWAY_SSH_KEY }}
+          SLURM_KNOWN_HOSTS: ${{ vars.SLURM_KNOWN_HOSTS }}
+        run: ./scripts/ci/slurm-client.sh setup-ssh --directory "$RUNNER_TEMP/slurm-ssh"
+      - name: Reach the login node before submitting a GPU job
+        timeout-minutes: 2
+        working-directory: controller
+        shell: bash
+        run: |
+          image_args=()
+          if [[ -n "$REUSE_IMAGE_SHA" ]]; then
+            image_args+=(--reuse-image-sha "$REUSE_IMAGE_SHA")
+          fi
+          ./scripts/ci/slurm-client.sh preflight \
+            --ssh-config "$RUNNER_TEMP/slurm-ssh/config" --ssh-host ci-slurm-login \
+            --expected-uid "$SLURM_UID" "${image_args[@]}"
+      - name: Submit, monitor and validate the same Slurm contract
+        timeout-minutes: 290
+        working-directory: controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_args=()
+          if [[ -n "$REUSE_IMAGE_SHA" ]]; then
+            image_args+=(--reuse-image-sha "$REUSE_IMAGE_SHA")
+          fi
+          ./scripts/ci/slurm-client.sh run \
+            --ssh-config "$RUNNER_TEMP/slurm-ssh/config" \
+            --ssh-host ci-slurm-login --expected-uid "$SLURM_UID" \
+            --controller-sha "$CONTROLLER_SHA" \
+            --source-dir "$GITHUB_WORKSPACE/candidate" --source-sha "$SOURCE_SHA" \
+            "${image_args[@]}" \
+            --run-key "$RUN_KEY" --suite aggregate --partition auto --gpus 1 \
+            --preferred-partition "$PREFERRED_PARTITION" --fallback-partition "$FALLBACK_PARTITION" \
+            --queue-timeout 30m --time-limit 04:00:00 --controller-timeout 285m \
+            --output "$RUNNER_TEMP/slurm-artifacts"
+      - name: Reconcile, cancel only this run if active, and collect partial evidence
+        if: always() && steps.controller_checkout.outcome == 'success'
+        timeout-minutes: 5
+        working-directory: controller
+        shell: bash
+        run: |
+          ./scripts/ci/slurm-client.sh finalize \
+            --ssh-config "$RUNNER_TEMP/slurm-ssh/config" \
+            --ssh-host ci-slurm-login --expected-uid "$SLURM_UID" --run-key "$RUN_KEY" \
+            --cancel-if-active --deadline-seconds 240 --output "$RUNNER_TEMP/slurm-artifacts"
+      - name: Record controller checkout failure without depending on its scripts
+        if: always() && steps.controller_checkout.outcome != 'success'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/slurm-artifacts"
+          printf '%s\n' 'controller checkout failed; no Slurm submission was attempted' \
+            > "$RUNNER_TEMP/slurm-artifacts/checkout-failure.txt"
+      - name: Upload selected evidence, not images/models/keys
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: rocm-slurm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/slurm-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove only temporary SSH material
+        if: always() && steps.controller_checkout.outcome == 'success'
+        timeout-minutes: 1
+        working-directory: controller
+        run: ./scripts/ci/slurm-client.sh cleanup-ssh --directory "$RUNNER_TEMP/slurm-ssh"

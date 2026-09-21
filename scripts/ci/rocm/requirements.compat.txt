@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# vLLM 0.29.0+rocm723 requires grpcio==1.78.0; AISimulate's open-ended
+# grpcio-tools dependency must resolve to the same protobuf-6 generation.
+grpcio==1.78.0
+grpcio-tools==1.78.0
+# requirements.test.txt caps opentelemetry-proto at 1.38. Keep the inherited
+# API, SDK, both OTLP exporters and Prometheus exporter on one release train.
+opentelemetry-api==1.38.0
+opentelemetry-exporter-otlp==1.38.0
+opentelemetry-exporter-prometheus==0.59b0
+opentelemetry-proto==1.38.0
+opentelemetry-sdk==1.38.0
+protobuf==6.33.6
+# The image exposes apt's PyGObject metadata to Python 3.12 but has no matching
+# pycairo wheel. Build the actual binding against libcairo2-dev for pip check.
+pycairo==1.28.0
