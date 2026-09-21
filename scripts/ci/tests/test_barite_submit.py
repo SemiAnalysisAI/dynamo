@@ -132,6 +132,7 @@ class SchedulerTests(unittest.TestCase):
             ),
             patch.object(submit, "load_request", return_value=request),
             patch.object(submit, "inspect_job", return_value=None),
+            patch.object(submit, "settle_terminal", return_value=None),
         ):
             submit.monitor(self.run)
         self.assertEqual(
@@ -170,6 +171,84 @@ class SchedulerTests(unittest.TestCase):
         state = submit.snapshot(self.run)
         self.assertTrue(state["active"])
         self.assertEqual(state["phase"], "awaiting-waiter")
+
+    def test_waiter_exit_settles_completing_to_cancelled(self):
+        now = [10.0]
+        records = [self.record("COMPLETING"), self.record("CANCELLED")]
+        with (
+            patch.object(submit.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(
+                submit.time,
+                "sleep",
+                side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            ),
+            patch.object(
+                submit,
+                "command",
+                side_effect=[
+                    SimpleNamespace(returncode=0, stdout=value) for value in records
+                ],
+            ),
+        ):
+            result = submit.settle_terminal(self.run, self.req, "123", 20)
+        self.assertEqual(result["state"], "CANCELLED")
+        self.assertEqual(
+            submit.read_json(self.run / "terminal.json")["state"], "CANCELLED"
+        )
+        self.assertTrue((self.run / "heartbeat.json").exists())
+
+    def test_missing_terminal_settle_stops_at_deadline(self):
+        now = [10.0]
+        with (
+            patch.object(submit.time, "monotonic", side_effect=lambda: now[0]),
+            patch.object(
+                submit.time,
+                "sleep",
+                side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            ),
+            patch.object(submit, "inspect_job", return_value=None) as inspect,
+        ):
+            result = submit.settle_terminal(self.run, self.req, "123", 13)
+        self.assertIsNone(result)
+        self.assertEqual(now[0], 13)
+        self.assertEqual(inspect.call_count, 2)
+        self.assertFalse((self.run / "terminal.json").exists())
+
+    def test_late_terminal_reconciles_only_missing_evidence_result(self):
+        submit.atomic_json(self.run / "receipt.json", {**self.req, "job_id": "123"})
+        submit.atomic_json(
+            self.run / "terminal.json",
+            {"run_key": self.req["run_key"], "job_id": "123", "state": "CANCELLED"},
+        )
+        submit.atomic_json(
+            self.run / "wait-result.json",
+            {"job_id": "123", "returncode": 143, "missing_record": False},
+        )
+        for reason, expected in (
+            (submit.WAIT_FINISHED_REASON, "terminal"),
+            ("scheduler identity mismatch", "indeterminate"),
+        ):
+            submit.atomic_json(
+                self.run / "controller-result.json",
+                {"status": "indeterminate", "reason": reason},
+            )
+            submit.reconcile_terminal(self.run, self.req)
+            self.assertEqual(
+                submit.read_json(self.run / "controller-result.json")["status"],
+                expected,
+            )
+
+    def test_late_terminal_different_job_never_reconciles(self):
+        submit.atomic_json(self.run / "receipt.json", {**self.req, "job_id": "123"})
+        submit.atomic_json(
+            self.run / "terminal.json",
+            {"run_key": self.req["run_key"], "job_id": "456", "state": "CANCELLED"},
+        )
+        submit.atomic_json(self.run / "wait-result.json", {"job_id": "123"})
+        result = {"status": "indeterminate", "reason": submit.WAIT_FINISHED_REASON}
+        submit.atomic_json(self.run / "controller-result.json", result)
+        submit.reconcile_terminal(self.run, self.req)
+        self.assertEqual(submit.read_json(self.run / "controller-result.json"), result)
 
     def test_unique_recovery_keeps_identity(self):
         with (

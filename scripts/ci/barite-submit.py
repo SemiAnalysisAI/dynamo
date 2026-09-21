@@ -58,8 +58,10 @@ def identity_matches(record, request, job_id=None):
     )
 
 
-def command(args):
-    return subprocess.run(args, capture_output=True, text=True, timeout=20, check=False)
+def command(args, timeout=20):
+    return subprocess.run(
+        args, capture_output=True, text=True, timeout=timeout, check=False
+    )
 
 
 def load_request(run):
@@ -102,8 +104,8 @@ def lock(run):
         yield
 
 
-def inspect_job(run, req, job_id):
-    result = command(["scontrol", "show", "job", "-o", str(job_id)])
+def inspect_job(run, req, job_id, timeout=20):
+    result = command(["scontrol", "show", "job", "-o", str(job_id)], timeout=timeout)
     if result.returncode:
         return None
     record = parse_record(result.stdout)
@@ -197,6 +199,48 @@ def snapshot(run):
             reason="monitor heartbeat expired; resume to recover",
         )
     return result
+
+
+WAIT_FINISHED_REASON = "wait finished; explicit terminal evidence required"
+
+
+def settle_terminal(run, req, job_id, deadline):
+    """The waiter may exit while Slurm still exposes a completing transition."""
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        atomic_json(run / "heartbeat.json", {"at": time.time()})
+        evidence = inspect_job(run, req, job_id, timeout=min(20, remaining))
+        if evidence and evidence["state"] in TERMINAL:
+            return evidence
+        time.sleep(min(2, max(0, deadline - time.monotonic())))
+    return None
+
+
+def reconcile_terminal(run, req):
+    """Upgrade only a missing-terminal outcome when later evidence arrives."""
+    paths = [
+        run / (name + ".json")
+        for name in ("controller-result", "terminal", "wait-result", "receipt")
+    ]
+    if not all(path.exists() for path in paths):
+        return
+    result, terminal, waiter, receipt = (read_json(path) for path in paths)
+    if result != {"status": "indeterminate", "reason": WAIT_FINISHED_REASON}:
+        return
+    job_id = receipt.get("job_id")
+    if (
+        receipt.get("run_key") != req["run_key"]
+        or receipt.get("source_sha") != req["source_sha"]
+        or terminal.get("run_key") != req["run_key"]
+        or terminal.get("state") not in TERMINAL
+        or not job_id
+        or terminal.get("job_id") != job_id
+        or waiter.get("job_id") != job_id
+    ):
+        return
+    atomic_json(paths[0], {"status": "terminal", "reason": WAIT_FINISHED_REASON})
 
 
 def monitor(run):
@@ -315,7 +359,10 @@ def monitor(run):
             {"returncode": code, "missing_record": missing_record, "job_id": job_id},
         )
         if job_id and terminal is None:
-            terminal = inspect_job(run, req, job_id)
+            remaining = req["controller_timeout_seconds"] - (time.time() - started)
+            terminal = settle_terminal(
+                run, req, job_id, time.monotonic() + max(0, min(60, remaining))
+            )
         status = (
             "terminal"
             if terminal and terminal["state"] in TERMINAL
@@ -325,7 +372,7 @@ def monitor(run):
             run / "controller-result.json",
             {
                 "status": status,
-                "reason": "wait finished; explicit terminal evidence required",
+                "reason": WAIT_FINISHED_REASON,
             },
         )
     except Exception as error:  # noqa: BLE001 - persist unexpected daemon failures and release its allocation
@@ -437,6 +484,7 @@ def main():
                     "reason": "submission receipt unavailable; never resubmitting",
                 },
             )
+    reconcile_terminal(run, req)
     print(json.dumps(snapshot(run), sort_keys=True))
 
 
