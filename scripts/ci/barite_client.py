@@ -249,7 +249,7 @@ names={'request.json','source-manifest.json','build-manifest.json','image-manife
 'model-manifest.json','allocation.json','completed.json','hip.json','import-origins.json',
 'test-manifest.json','test-summary.json','contract.json','provenance.json','receipt.json','terminal.json','wait-result.json',
 'controller-result.json','monitor.json','heartbeat.json','cancel.json','scheduler-latest.json',
-'submission-intent.json','collection.txt','environment.json','wheel-manifest.json',
+'submission-intent.json','partition-selection.json','collection.txt','environment.json','wheel-manifest.json',
 'imports-collection.json','frontend-collection.json','aggregate-collection.json',
 'frontend-listeners.json','aggregate-listeners.json'}
 with tarfile.open(fileobj=sys.stdout.buffer,mode='w|') as archive:
@@ -442,7 +442,7 @@ def start_run(args, connection, info):
             "controller_bundle_sha256": bundle_sha,
             "reuse_image_sha": args.reuse_image_sha,
             "suite": "aggregate",
-            "partition": "compute-0",
+            "partition": args.partition,
             "gpus": 1,
             "cpus": 16,
             "mem_gib": 64,
@@ -560,7 +560,9 @@ def main():
     parser.add_argument("--controller-sha")
     parser.add_argument("--reuse-image-sha")
     parser.add_argument("--suite", choices=("aggregate",), default="aggregate")
-    parser.add_argument("--partition", choices=("compute-0",), default="compute-0")
+    parser.add_argument(
+        "--partition", choices=("auto", "compute-1", "compute-0"), default="auto"
+    )
     parser.add_argument("--gpus", type=int, choices=(1,), default=1)
     parser.add_argument("--queue-timeout", choices=("30m",), default="30m")
     parser.add_argument("--time-limit", choices=("04:00:00",), default="04:00:00")

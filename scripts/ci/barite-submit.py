@@ -76,7 +76,6 @@ def load_request(run):
     expected = {
         "schema_version": 1,
         "suite": "aggregate",
-        "partition": "compute-0",
         "gpus": 1,
         "cpus": 16,
         "mem_gib": 64,
@@ -84,6 +83,8 @@ def load_request(run):
         "queue_timeout_seconds": 1800,
         "controller_timeout_seconds": 17100,
     }
+    if req.get("partition") not in ("auto", "compute-0", "compute-1"):
+        raise ValueError("unsupported partition policy")
     if any(req.get(k) != v for k, v in expected.items()):
         raise ValueError("unsupported or unbounded allocation request")
     if (
@@ -201,6 +202,91 @@ def snapshot(run):
     return result
 
 
+def idle_gpu_node(record):
+    """Recognize healthy idle MI300X-pool nodes with enough requested resources."""
+    states = set(record.get("State", "").split("+"))
+    if "IDLE" not in states or states - {"IDLE", "DYNAMIC_NORM"}:
+        return False
+    if "compute-1" not in record.get("Partitions", "").split(","):
+        return False
+    try:
+        cpus = int(record["CPUEfctv"]) - int(record["CPUAlloc"])
+        memory = int(record["RealMemory"]) - int(record["AllocMem"])
+    except (KeyError, ValueError) as error:
+        raise ValueError("incomplete idle-node resource evidence") from error
+    gpu = re.search(
+        r"(?:^|,)gpu(?::[^:,()]+)?:([1-9][0-9]*)(?:\(|,|$)", record.get("Gres", "")
+    )
+    return cpus >= 16 and memory >= 65536 and gpu is not None
+
+
+def select_partition(run, req):
+    """Choose from current scheduler evidence; never treat a query failure as idle."""
+    policy = req["partition"]
+    evidence = {"requested_policy": policy, "observed_at": time.time(), "queries": []}
+
+    def query(args):
+        result = command(args)
+        evidence["queries"].append(
+            {
+                "command": args,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        )
+        atomic_json(run / "partition-selection.json", evidence)
+        if result.returncode:
+            raise RuntimeError("partition selection scheduler query failed")
+        return result.stdout
+
+    def partition(name):
+        record = parse_record(query(["scontrol", "show", "partition", "-o", name]))
+        if record.get("PartitionName") != name or record.get("State") not in {
+            "UP",
+            "DOWN",
+            "DRAIN",
+            "INACTIVE",
+        }:
+            raise ValueError("invalid partition selection evidence")
+        return record
+
+    preferred = "compute-1" if policy == "auto" else policy
+    chosen = preferred
+    state = partition(preferred)
+    if policy == "auto":
+        candidates = []
+        if state["State"] == "UP":
+            output = query(["scontrol", "show", "nodes", "-o"])
+            records = [
+                parse_record(line) for line in output.splitlines() if line.strip()
+            ]
+            if not records or any(
+                not {"NodeName", "State", "Partitions", "Gres"}.issubset(record)
+                for record in records
+            ):
+                raise ValueError("invalid node selection evidence")
+            candidates = [
+                record["NodeName"] for record in records if idle_gpu_node(record)
+            ]
+        evidence["eligible_idle_nodes"] = sorted(candidates)
+        if not candidates:
+            chosen = "compute-0"
+            state = partition(chosen)
+            evidence["reason"] = (
+                "no eligible idle GPU node in available compute-1 partition"
+            )
+        else:
+            evidence["reason"] = "compute-1 has eligible idle GPU nodes"
+    else:
+        evidence["reason"] = "explicit partition override"
+    if state["State"] != "UP":
+        raise RuntimeError("selected partition is not available")
+    evidence["chosen_partition"] = chosen
+    atomic_json(run / "partition-selection.json", evidence)
+    return chosen
+
+
 WAIT_FINISHED_REASON = "wait finished; explicit terminal evidence required"
 
 
@@ -258,7 +344,6 @@ def monitor(run):
         "--parsable",
         "--wait",
         "--no-requeue",
-        "--partition=compute-0",
         "--nodes=1",
         "--ntasks=1",
         "--gpus=1",
@@ -281,6 +366,7 @@ def monitor(run):
     missing_record = False
     terminal = None
     try:
+        args.insert(4, "--partition=" + select_partition(run, req))
         process = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
         )

@@ -63,10 +63,18 @@ OUTPUT="$HOME/barite-results/$RUN_KEY"
   --ssh-host barite-login --expected-uid 20011 \
   --controller-sha "$CONTROLLER_SHA" \
   --source-dir "$CANDIDATE_DIR" --source-sha "$SOURCE_SHA" \
-  --run-key "$RUN_KEY" --suite aggregate --partition compute-0 --gpus 1 \
+  --run-key "$RUN_KEY" --suite aggregate --partition auto --gpus 1 \
   --queue-timeout 30m --time-limit 04:00:00 --controller-timeout 285m \
   --output "$OUTPUT"
 ```
+
+The default `--partition auto` policy prefers `compute-1` when current Slurm
+evidence shows an eligible idle GPU node with enough CPU and memory. Otherwise it
+falls back to an available `compute-0` partition. A failed or malformed scheduler
+query stops submission; it never silently chooses a fallback. The selected
+partition and query evidence are saved in `partition-selection.json`. An idle
+snapshot is not a reservation: Slurm can still queue the job. Explicit
+`--partition compute-1` and `--partition compute-0` are diagnostic overrides.
 
 The fixed request uses one node/task/GPU, 16 CPUs, 64 GiB memory, and no automatic
 requeue. The queue budget is 30 minutes; the allocation limit is four hours.

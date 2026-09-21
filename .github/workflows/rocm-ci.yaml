@@ -108,7 +108,7 @@ jobs:
             --controller-sha "$CONTROLLER_SHA" \
             --source-dir "$GITHUB_WORKSPACE/candidate" --source-sha "$SOURCE_SHA" \
             "${image_args[@]}" \
-            --run-key "$RUN_KEY" --suite aggregate --partition compute-0 --gpus 1 \
+            --run-key "$RUN_KEY" --suite aggregate --partition auto --gpus 1 \
             --queue-timeout 30m --time-limit 04:00:00 --controller-timeout 285m \
             --output "$RUNNER_TEMP/barite-artifacts"
       - name: Reconcile, cancel only this run if active, and collect partial evidence
