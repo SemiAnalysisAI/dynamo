@@ -38,6 +38,53 @@ def inspect_image(docker, tag, destination):
     return inspected[0]
 
 
+def record_image(docker, image_id, results, scratch):
+    # A rootful daemon cannot traverse a root-squashed NFS home directory.
+    # Bind node-local inputs and copy evidence back as the submitting user.
+    inspection = scratch / "image-inspection"
+    inspection.mkdir(mode=0o700)
+    shutil.copytree(results / "controller", inspection / "controller")
+    for name in ("request.json", "image-build.json"):
+        shutil.copyfile(results / name, inspection / name)
+    try:
+        run(
+            docker.command(
+                "run",
+                "--rm",
+                "--network=none",
+                "--cgroup-parent",
+                docker.cgroup_parent,
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                "--mount",
+                f"type=bind,src={inspection},dst=/results",
+                "--mount",
+                f"type=bind,src={inspection / 'controller'},dst=/results/controller,readonly",
+                "--entrypoint",
+                "/opt/dynamo/venv/bin/python3",
+                image_id,
+                "-I",
+                "/results/controller/rocm/record_image.py",
+                "--results",
+                "/results",
+            ),
+            results / "record-image.log",
+        )
+    finally:
+        # Preserve partial diagnostics if image inspection fails.
+        for name in (
+            "installed-packages.log",
+            "native-packages.log",
+            "native-linkage.log",
+            "pip-check.log",
+            "build-spec.json",
+            "build-manifest.json",
+        ):
+            output = inspection / name
+            if output.is_file() and not output.is_symlink():
+                shutil.copyfile(output, results / name)
+
+
 def build_images(source, results, scratch):
     require(os.environ.get("SLURM_JOB_ID"), "Image builds require a Slurm allocation")
     request = read_json(results / "request.json")
@@ -164,29 +211,7 @@ def build_images(source, results, scratch):
             },
         )
         # Inspect the final test image without installing or copying anything into it.
-        run(
-            docker.command(
-                "run",
-                "--rm",
-                "--network=none",
-                "--cgroup-parent",
-                docker.cgroup_parent,
-                "--user",
-                f"{os.getuid()}:{os.getgid()}",
-                "--mount",
-                f"type=bind,src={results},dst=/results",
-                "--mount",
-                f"type=bind,src={results / 'controller'},dst=/results/controller,readonly",
-                "--entrypoint",
-                "/opt/dynamo/venv/bin/python3",
-                test["Id"],
-                "-I",
-                "/results/controller/rocm/record_image.py",
-                "--results",
-                "/results",
-            ),
-            results / "record-image.log",
-        )
+        record_image(docker, test["Id"], results, scratch)
         # Enroot's dockerd importer saves this exact image from the private daemon.
         # No registry push or replacement image is involved.
         enroot_env = {

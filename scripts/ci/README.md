@@ -127,6 +127,9 @@ keeps builds inside the Slurm resource allocation; cleanup stops the private
 daemon. The lane uses no shared host Docker socket and runs no compiler on the
 login host. Runtime and test builds are ordinary repository Docker builds;
 test execution installs no additional packages.
+Image inspection uses node-local bind mounts so root-squashed shared homes
+work with the private daemon. The submitting account copies the evidence back
+to shared storage, including partial diagnostics when inspection fails.
 
 `image-build.json` records both Dockerfile hashes, both local OCI image config
 digests, and the runtime sanity results. The collected Dockerfiles and

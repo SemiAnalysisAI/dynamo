@@ -62,4 +62,6 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 USER dynamo
 ENTRYPOINT []
+# Enroot's dockerd importer creates a container without supplying a command.
+CMD ["/bin/bash"]
 # No release compliance stages: this ROCm target is an opt-in qualification image.

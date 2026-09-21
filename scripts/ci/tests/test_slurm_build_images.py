@@ -28,6 +28,8 @@ class ImageBuildTest(unittest.TestCase):
         )
         self.results = self.root / "results"
         self.results.mkdir()
+        (self.results / "controller/rocm").mkdir(parents=True)
+        (self.results / "controller/rocm/record_image.py").write_text("# controller\n")
         (self.results / "request.json").write_text(
             json.dumps({"source_sha": "a" * 40, "run_key": "build-1"})
         )
@@ -142,6 +144,67 @@ class ImageBuildTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different base image"):
             self.exercise(lambda *args, **kwargs: None)
         self.assertFalse((self.results / "image-build.json").exists())
+
+    def test_inspection_binds_only_local_scratch_and_copies_evidence_back(self):
+        (self.results / "image-build.json").write_text('{"runtime_sanity": "passed"}')
+
+        def inspect(command, log, **kwargs):
+            mounts = [
+                command[index + 1]
+                for index, argument in enumerate(command)
+                if argument == "--mount"
+            ]
+            for mount in mounts:
+                source = next(
+                    item.removeprefix("src=")
+                    for item in mount.split(",")
+                    if item.startswith("src=")
+                )
+                self.assertTrue(Path(source).is_relative_to(self.scratch))
+            local = self.scratch / "image-inspection"
+            for name in (
+                "request.json",
+                "image-build.json",
+                "controller/rocm/record_image.py",
+            ):
+                self.assertEqual(
+                    (local / name).read_bytes(), (self.results / name).read_bytes()
+                )
+            (local / "build-manifest.json").write_text('{"checked": true}')
+            (local / "pip-check.log").write_text("No broken requirements found.\n")
+
+        with patch.object(build_images, "run", side_effect=inspect):
+            build_images.record_image(
+                self.daemon, self.test["Id"], self.results, self.scratch
+            )
+        self.assertEqual(
+            json.loads((self.results / "build-manifest.json").read_text()),
+            {"checked": True},
+        )
+        self.assertEqual(
+            (self.results / "pip-check.log").read_text(),
+            "No broken requirements found.\n",
+        )
+
+    def test_failed_inspection_preserves_partial_diagnostics(self):
+        (self.results / "image-build.json").write_text("{}")
+
+        def fail(command, log, **kwargs):
+            local = self.scratch / "image-inspection"
+            (local / "native-linkage.log").write_text("missing library\n")
+            raise subprocess.CalledProcessError(1, command)
+
+        with (
+            patch.object(build_images, "run", side_effect=fail),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            build_images.record_image(
+                self.daemon, self.test["Id"], self.results, self.scratch
+            )
+        self.assertEqual(
+            (self.results / "native-linkage.log").read_text(), "missing library\n"
+        )
+        self.assertFalse((self.results / "build-manifest.json").exists())
 
 
 if __name__ == "__main__":
