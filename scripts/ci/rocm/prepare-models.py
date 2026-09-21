@@ -8,11 +8,12 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
-
-from huggingface_hub import snapshot_download
 
 
 def digest(path):
@@ -45,6 +46,9 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
         # Reuse only a fully rehashed immutable cache for this exact revision.
         for candidate in args.cache_root.iterdir():
+            # Interrupted staging directories are not published cache entries.
+            if re.fullmatch(r"[0-9a-f]{64}", candidate.name) is None:
+                continue
             manifest = candidate / "model-content.json"
             if not candidate.is_dir() or not manifest.is_file():
                 continue
@@ -64,11 +68,34 @@ def main():
 
         staging = Path(tempfile.mkdtemp(prefix=".preparing-", dir=args.cache_root))
         try:
-            snapshot_download(
-                repo_id=model["repo_id"],
-                revision=model["revision"],
-                cache_dir=staging / "hub",
-            )
+            # Xet initializes its cache when huggingface_hub is imported. Give
+            # a child process writable caches before that import, while keeping
+            # transient Xet data outside the content-addressed model snapshot.
+            with tempfile.TemporaryDirectory(
+                prefix=".download-", dir=args.cache_root
+            ) as temporary:
+                scratch = Path(temporary)
+                environment = dict(os.environ)
+                environment.update(
+                    HF_HOME=str(scratch / "hf"),
+                    HF_HUB_CACHE=str(staging / "hub"),
+                    HF_XET_CACHE=str(scratch / "xet"),
+                    HF_ASSETS_CACHE=str(scratch / "assets"),
+                    XDG_CACHE_HOME=str(scratch / "cache"),
+                    TMPDIR=str(scratch),
+                )
+                subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        str(Path(__file__).with_name("download_model.py")),
+                        model["repo_id"],
+                        model["revision"],
+                        str(staging / "hub"),
+                    ],
+                    env=environment,
+                    check=True,
+                )
             repo = staging / "hub" / ("models--" + model["repo_id"].replace("/", "--"))
             (repo / "refs").mkdir(exist_ok=True)
             (repo / "refs/main").write_text(model["revision"])
@@ -82,9 +109,9 @@ def main():
             for path in staging.rglob("*"):
                 if not path.is_symlink():
                     path.chmod(0o555 if path.is_dir() else 0o444)
-            staging.chmod(0o555)
             destination = args.cache_root / key
             os.rename(staging, destination)
+            destination.chmod(0o555)
             publish_result(args.output, destination)
         finally:
             if staging.exists():

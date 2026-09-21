@@ -156,7 +156,12 @@ def main():
         "--import-mode=importlib",
         "--junitxml=" + str(result / "test-results" / (suite + ".xml")),
     ]
-    if suite != "imports":
+    if suite == "imports":
+        # These six cases define their own fixture and need no services. The
+        # bindings conftest has an unrelated autouse fixture which starts or
+        # reuses default-port NATS/etcd; do not launch it for pure import checks.
+        options += ["--noconftest"]
+    else:
         options += ["--models-dir=/models"]
     if suite == "frontend":
         options += ["--timeout=600"]

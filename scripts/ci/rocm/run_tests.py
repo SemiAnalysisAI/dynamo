@@ -32,20 +32,7 @@ def main():
     started_at = time.time()
     result = args.results
     (result / "test-results").mkdir(parents=True, exist_ok=True)
-    cache = Path("/workspace/.ci-test-cache")
-    cache.mkdir(exist_ok=True)
-    (cache / "tmp").mkdir(exist_ok=True)
     os.environ.update(
-        XDG_CACHE_HOME=str(cache),
-        TORCHINDUCTOR_CACHE_DIR=str(cache / "torchinductor"),
-        TRITON_CACHE_DIR=str(cache / "triton"),
-        TORCH_EXTENSIONS_DIR=str(cache / "torch-extensions"),
-        VLLM_CACHE_ROOT=str(cache / "vllm"),
-        TMPDIR=str(cache / "tmp"),
-        HF_HOME="/models",
-        HF_HUB_CACHE="/models/hub",
-        HF_HUB_OFFLINE="1",
-        TRANSFORMERS_OFFLINE="1",
         DYN_TEST_OUTPUT_PATH=str(result / "service-logs"),
         DYNAMO_CI_SERVICE_HOST="127.0.0.1",
         DYN_HTTP_HOST="127.0.0.1",
