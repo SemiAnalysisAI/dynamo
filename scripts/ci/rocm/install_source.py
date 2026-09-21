@@ -95,6 +95,7 @@ def main():
         "git",
         "libnuma-dev",
         "libudev-dev",
+        "libcairo2-dev",
     )
     run("python3", "-m", "venv", "--system-site-packages", PREFIX / "venv")
     os.environ["PATH"] = (
@@ -228,8 +229,17 @@ def main():
         "-r",
         ROOT / "container/deps/requirements.aisimulate.txt",
     )
-    run(*pip, *sorted(dist.glob("*.whl")))
-    run(*pip, "-r", ROOT / "container/deps/requirements.test.txt")
+    # Resolve all requirements together. In particular, make inherited vLLM an
+    # explicit root so pip honors its grpcio pin when resolving AISimulate.
+    run(
+        *pip,
+        *sorted(dist.glob("*.whl")),
+        "vllm",
+        "-r",
+        ROOT / "container/deps/requirements.test.txt",
+        "-r",
+        Path(__file__).with_name("requirements.compat.txt"),
+    )
     after = subprocess.check_output([str(PYTHON), "-I", "-c", before_code], text=True)
     assert json.loads(before) == json.loads(after), "Base engine version/origin changed"
     context = (ROOT / "container/context.yaml").read_text()
