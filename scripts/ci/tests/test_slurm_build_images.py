@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the official image-build sequence without starting a daemon."""
 
+import getpass
 import json
 import os
 import subprocess
@@ -205,6 +206,34 @@ class ImageBuildTest(unittest.TestCase):
             (self.results / "native-linkage.log").read_text(), "missing library\n"
         )
         self.assertFalse((self.results / "build-manifest.json").exists())
+
+    def test_inspection_supports_uid_without_passwd_entry(self):
+        (self.results / "image-build.json").write_text("{}")
+
+        def inspect(command, log, **kwargs):
+            environment = dict(
+                command[index + 1].split("=", 1)
+                for index, argument in enumerate(command)
+                if argument == "--env"
+            )
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch("pwd.getpwuid", side_effect=KeyError("unmapped uid")),
+            ):
+                self.assertEqual(getpass.getuser(), "dynamo")
+                self.assertEqual(Path("~").expanduser(), Path("/results/home"))
+            home = self.scratch / "image-inspection/home"
+            (home / "probe").write_text("writable")
+            self.assertTrue(
+                Path(environment["TORCHINDUCTOR_CACHE_DIR"]).is_relative_to(
+                    "/results/home"
+                )
+            )
+
+        with patch.object(build_images, "run", side_effect=inspect):
+            build_images.record_image(
+                self.daemon, self.test["Id"], self.results, self.scratch
+            )
 
 
 if __name__ == "__main__":

@@ -43,9 +43,12 @@ def record_image(docker, image_id, results, scratch):
     # Bind node-local inputs and copy evidence back as the submitting user.
     inspection = scratch / "image-inspection"
     inspection.mkdir(mode=0o700)
+    (inspection / "home").mkdir(mode=0o700)
     shutil.copytree(results / "controller", inspection / "controller")
     for name in ("request.json", "image-build.json"):
         shutil.copyfile(results / name, inspection / name)
+    # The Slurm UID need not have an image passwd entry. Libraries still need
+    # a username and writable home/cache directories during import.
     try:
         run(
             docker.command(
@@ -56,6 +59,16 @@ def record_image(docker, image_id, results, scratch):
                 docker.cgroup_parent,
                 "--user",
                 f"{os.getuid()}:{os.getgid()}",
+                "--env",
+                "HOME=/results/home",
+                "--env",
+                "USER=dynamo",
+                "--env",
+                "LOGNAME=dynamo",
+                "--env",
+                "XDG_CACHE_HOME=/results/home/.cache",
+                "--env",
+                "TORCHINDUCTOR_CACHE_DIR=/results/home/.cache/torchinductor",
                 "--mount",
                 f"type=bind,src={inspection},dst=/results",
                 "--mount",
