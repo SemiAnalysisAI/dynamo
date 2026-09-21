@@ -40,7 +40,9 @@ def main():
         # All cooperating Dynamo services share this one-node allocation.
         DYN_TCP_RPC_HOST="127.0.0.1",
         DYN_TCP_RESPONSE_STREAM_HOST="127.0.0.1",
-        DYN_EVENT_PLANE_HOST="127.0.0.1",
+        # Direct ZMQ publishers bind a wildcard even with a loopback advertised
+        # host. Use the existing loopback NATS service for this one-node lane.
+        DYN_EVENT_PLANE="nats",
     )
     contract = json.loads(Path(__file__).with_name("contract.json").read_text())
     request = json.loads((result / "request.json").read_text())

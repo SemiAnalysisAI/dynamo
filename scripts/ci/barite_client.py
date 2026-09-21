@@ -626,6 +626,14 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        print(f"Barite CI: {error}", file=sys.stderr)
+        if error.stderr:
+            detail = error.stderr
+            if isinstance(detail, bytes):
+                detail = detail.decode("utf-8", errors="replace")
+            print(detail[-8192:], file=sys.stderr)
+        sys.exit(1)
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         print(f"Barite CI: {error}", file=sys.stderr)
         sys.exit(1)

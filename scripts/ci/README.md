@@ -99,8 +99,10 @@ scratch bind mount inside the test container. The account's real home is not
 mounted, `HOME` is unchanged, and the image and pinned model snapshot stay
 read-only during testing.
 
-This single-node lane binds Dynamo's HTTP, system, request, response and event
-interfaces to loopback. Listener evidence covers the five named service ports
+This single-node lane binds Dynamo's HTTP, system, request and response
+interfaces to loopback and sends events through the existing loopback NATS
+service (`DYN_EVENT_PLANE=nats`). Direct ZMQ publishers bind a wildcard even when
+their advertised host is loopback. Listener evidence covers the five named service ports
 and every TCP listener owned by the frontend and worker system-endpoint PIDs.
 It does not claim to inventory unrelated engine subprocess sockets.
 
