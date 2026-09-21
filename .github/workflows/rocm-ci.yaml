@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Manual, protected fork-only lane. Controller code comes from the workflow commit.
+name: ROCm Slurm CI
+on:
+  workflow_dispatch:
+    inputs:
+      controller_sha:
+        description: Exact reviewed main workflow/controller commit used locally
+        required: true
+        type: string
+      source_sha:
+        description: Reviewed full candidate SHA on the fork's rocm-ci branch
+        required: true
+        type: string
+      reuse_image_sha:
+        description: Published SQSH SHA256 for parity; empty builds a new image
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: barite-rocm-ci
+  cancel-in-progress: false
+jobs:
+  aggregate:
+    if: github.repository == 'SemiAnalysisAI/dynamo' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: barite-rocm
+    timeout-minutes: 330
+    env:
+      CONTROLLER_SHA: ${{ inputs.controller_sha }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      REUSE_IMAGE_SHA: ${{ inputs.reuse_image_sha }}
+      RUN_KEY: gh-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Initialize local evidence before checkout
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/barite-artifacts"
+          printf '%s\n' "run=$RUN_KEY" "workflow_sha=$GITHUB_SHA" "phase=before-checkout" \
+            > "$RUNNER_TEMP/barite-artifacts/controller-start.txt"
+      - name: Checkout trusted controller from the workflow commit
+        id: controller_checkout
+        timeout-minutes: 10
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          path: controller
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate reviewed source identity
+        timeout-minutes: 1
+        working-directory: controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CONTROLLER_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_SHA" = "$CONTROLLER_SHA"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ -z "$REUSE_IMAGE_SHA" || "$REUSE_IMAGE_SHA" =~ ^[0-9a-f]{64}$ ]]
+          git cat-file -e "$SOURCE_SHA^{commit}"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/rocm-ci
+      - name: Materialize candidate files without executing them
+        timeout-minutes: 10
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: candidate
+          lfs: true
+          persist-credentials: false
+      - name: Configure scoped SSH credentials and pinned host keys
+        timeout-minutes: 1
+        working-directory: controller
+        shell: bash
+        env:
+          TW_JUMP_SSH_KEY: ${{ secrets.TW_JUMP_SSH_KEY }}
+          BARITE_SSH_KEY: ${{ secrets.BARITE_SSH_KEY }}
+          BARITE_KNOWN_HOSTS: ${{ vars.BARITE_KNOWN_HOSTS }}
+        run: ./scripts/ci/barite-client.sh setup-ssh --directory "$RUNNER_TEMP/barite-ssh"
+      - name: Reach the login node before submitting a GPU job
+        timeout-minutes: 2
+        working-directory: controller
+        shell: bash
+        run: |
+          image_args=()
+          if [[ -n "$REUSE_IMAGE_SHA" ]]; then
+            image_args+=(--reuse-image-sha "$REUSE_IMAGE_SHA")
+          fi
+          ./scripts/ci/barite-client.sh preflight \
+            --ssh-config "$RUNNER_TEMP/barite-ssh/config" --ssh-host ci-barite-login \
+            --expected-uid 20011 "${image_args[@]}"
+      - name: Submit, monitor and validate the same Slurm contract
+        timeout-minutes: 290
+        working-directory: controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_args=()
+          if [[ -n "$REUSE_IMAGE_SHA" ]]; then
+            image_args+=(--reuse-image-sha "$REUSE_IMAGE_SHA")
+          fi
+          ./scripts/ci/barite-client.sh run \
+            --ssh-config "$RUNNER_TEMP/barite-ssh/config" \
+            --ssh-host ci-barite-login \
+            --controller-sha "$CONTROLLER_SHA" \
+            --source-dir "$GITHUB_WORKSPACE/candidate" --source-sha "$SOURCE_SHA" \
+            "${image_args[@]}" \
+            --run-key "$RUN_KEY" --suite aggregate --partition compute-0 --gpus 1 \
+            --queue-timeout 30m --time-limit 04:00:00 --controller-timeout 285m \
+            --output "$RUNNER_TEMP/barite-artifacts"
+      - name: Reconcile, cancel only this run if active, and collect partial evidence
+        if: always() && steps.controller_checkout.outcome == 'success'
+        timeout-minutes: 5
+        working-directory: controller
+        shell: bash
+        run: |
+          ./scripts/ci/barite-client.sh finalize \
+            --ssh-config "$RUNNER_TEMP/barite-ssh/config" \
+            --ssh-host ci-barite-login --run-key "$RUN_KEY" \
+            --cancel-if-active --deadline-seconds 240 --output "$RUNNER_TEMP/barite-artifacts"
+      - name: Record controller checkout failure without depending on its scripts
+        if: always() && steps.controller_checkout.outcome != 'success'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/barite-artifacts"
+          printf '%s\n' 'controller checkout failed; no Slurm submission was attempted' \
+            > "$RUNNER_TEMP/barite-artifacts/checkout-failure.txt"
+      - name: Upload selected evidence, not images/models/keys
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: barite-rocm-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/barite-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove only temporary SSH material
+        if: always() && steps.controller_checkout.outcome == 'success'
+        timeout-minutes: 1
+        working-directory: controller
+        run: ./scripts/ci/barite-client.sh cleanup-ssh --directory "$RUNNER_TEMP/barite-ssh"
