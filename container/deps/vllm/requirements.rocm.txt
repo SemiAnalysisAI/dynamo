@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# vLLM 0.29.0 on ROCm 7.2.3 requires grpcio 1.78. Keep AISimulate's
+# grpcio-tools dependency on the same protobuf-6 release family.
+grpcio==1.78.0
+grpcio-tools==1.78.0
+# Match requirements.test.txt's OpenTelemetry cap without mixing release trains.
+opentelemetry-api==1.38.0
+opentelemetry-exporter-otlp==1.38.0
+opentelemetry-exporter-prometheus==0.59b0
+opentelemetry-proto==1.38.0
+opentelemetry-sdk==1.38.0
+protobuf==6.33.6
+# The base exposes PyGObject metadata but lacks the Python 3.12 Cairo binding.
+# wheel_builder compiles this binding against the base's native Cairo library.
+pycairo==1.28.0

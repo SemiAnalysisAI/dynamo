@@ -790,6 +790,9 @@ def pytest_collection_modifyitems(config, items):
 
 class EtcdServer(ManagedProcess):
     def __init__(self, request, port=2379, timeout=300):
+        service_host = os.environ.get("DYNAMO_CI_SERVICE_HOST")
+        if service_host not in (None, "127.0.0.1"):
+            raise ValueError("DYNAMO_CI_SERVICE_HOST must be 127.0.0.1 when set")
         # Allocate free ports if port is 0
         use_random_port = port == 0
         if use_random_port:
@@ -802,6 +805,8 @@ class EtcdServer(ManagedProcess):
         self.port = port
         self.peer_port = peer_port  # Store for cleanup
         self.use_random_port = use_random_port  # Track if we allocated the port
+        listen_host = service_host or "0.0.0.0"
+        peer_host = service_host or "localhost"
         port_string = str(port)
         etcd_env = os.environ.copy()
         etcd_env["ALLOW_NONE_AUTHENTICATION"] = "yes"
@@ -810,22 +815,22 @@ class EtcdServer(ManagedProcess):
         command = [
             "etcd",
             "--listen-client-urls",
-            f"http://0.0.0.0:{port_string}",
+            f"http://{listen_host}:{port_string}",
             "--advertise-client-urls",
-            f"http://0.0.0.0:{port_string}",
+            f"http://{listen_host}:{port_string}",
         ]
 
-        # Add peer port configuration only for random ports (parallel execution)
-        if peer_port is not None:
-            peer_port_string = str(peer_port)
+        # Configure peers for parallel execution or explicit loopback binding.
+        if peer_port is not None or service_host:
+            peer_port_string = str(peer_port or 2380)
             command.extend(
                 [
                     "--listen-peer-urls",
-                    f"http://0.0.0.0:{peer_port_string}",
+                    f"http://{listen_host}:{peer_port_string}",
                     "--initial-advertise-peer-urls",
-                    f"http://localhost:{peer_port_string}",
+                    f"http://{peer_host}:{peer_port_string}",
                     "--initial-cluster",
-                    f"default=http://localhost:{peer_port_string}",
+                    f"default=http://{peer_host}:{peer_port_string}",
                 ]
             )
 
@@ -863,6 +868,9 @@ class EtcdServer(ManagedProcess):
 
 class NatsServer(ManagedProcess):
     def __init__(self, request, port=4222, timeout=300, disable_jetstream=False):
+        self._service_host = os.environ.get("DYNAMO_CI_SERVICE_HOST")
+        if self._service_host not in (None, "127.0.0.1"):
+            raise ValueError("DYNAMO_CI_SERVICE_HOST must be 127.0.0.1 when set")
         # Allocate a free port if port is 0
         use_random_port = port == 0
         if use_random_port:
@@ -881,6 +889,8 @@ class NatsServer(ManagedProcess):
             "-p",
             str(port),
         ]
+        if self._service_host:
+            command.extend(["--addr", self._service_host])
         if not disable_jetstream and data_dir:
             command.extend(["-js", "--store_dir", data_dir])
         super().__init__(
@@ -962,6 +972,8 @@ class NatsServer(ManagedProcess):
             "-p",
             str(self.port),
         ]
+        if self._service_host:
+            self.command.extend(["--addr", self._service_host])
         if not self._disable_jetstream and self.data_dir:
             self.command.extend(["-js", "--store_dir", self.data_dir])
 

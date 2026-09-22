@@ -343,6 +343,7 @@ areas:
   - container/render.py
   - container/run.sh
   - container/templates/
+  - container/tests/
   - container/use-sccache.sh
   - deny.toml
   - dev/docker-compose.yml

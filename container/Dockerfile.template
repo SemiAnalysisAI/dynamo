@@ -4,6 +4,11 @@
 
 {% include "templates/args.Dockerfile" %}
 
+{% if device == "rocm" %}
+{% include "templates/dynamo_base.Dockerfile" %}
+{% include "templates/rocm_wheel_builder.Dockerfile" %}
+{% include "templates/vllm_rocm_runtime.Dockerfile" %}
+{% else %}
 # --- Base Image Stages
 {% if framework != "dynamo" %}
     {% include "templates/dynamo_base.Dockerfile" %}
@@ -77,3 +82,4 @@
 {% else %}
 # --- No development stages included
 {% endif %}
+{%- endif %}

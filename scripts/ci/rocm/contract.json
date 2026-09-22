@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "base_uri": "docker://registry-1.docker.io#vllm/vllm-openai-rocm@sha256:e5e47f6aaab675c252c381f0dac237b31b10d87bb74d092b07fb4065efd7f5a1",
+  "model": {
+    "repo_id": "Qwen/Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca"
+  },
+  "tools": {
+    "rust": "1.96.1",
+    "maturin": "1.9.6",
+    "vllm": "0.29.0",
+    "protoc": "33.0"
+  },
+  "suites": {
+    "imports": [
+      "lib/bindings/python/tests/test_nixl_connect_lazy_import.py::test_module_imports_without_nixl",
+      "lib/bindings/python/tests/test_nixl_connect_lazy_import.py::test_proxy_raises_clear_error_on_attribute_access",
+      "lib/bindings/python/tests/test_nixl_connect_lazy_import.py::test_proxy_raises_clear_error_on_call",
+      "lib/bindings/python/tests/test_nixl_connect_lazy_import.py::test_proxy_chains_original_import_error",
+      "lib/bindings/python/tests/test_nixl_connect_lazy_import.py::test_connection_construction_raises_without_nixl",
+      "lib/bindings/python/tests/test_nixl_connect_lazy_import.py::test_real_nixl_path_unchanged"
+    ],
+    "frontend": [
+      "tests/frontend/test_completion_mocker_engine.py::test_completion_string_prompt"
+    ],
+    "aggregate": [
+      "tests/serve/test_vllm.py::test_serve_deployment[aggregated-3]"
+    ]
+  }
+}

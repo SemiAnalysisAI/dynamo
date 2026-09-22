@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Resource limits are supplied by the trusted submission controller.
+set -euo pipefail
+umask 077
+unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP
+unset PYTEST_ADDOPTS PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD
+# stdbuf belongs to the submitter's streamed JobID receipt, not the workload.
+unset LD_PRELOAD _STDBUF_O _STDBUF_E
+export PYTHONNOUSERSITE=1
+RUN_DIR=${1:?run directory required}
+CONTROLLER="$RUN_DIR/controller"
+ROOT=$(dirname "$(dirname "$RUN_DIR")")
+child=''
+scratch=''
+finished=0
+
+# Wait explicitly: a foreground srun can defer shell traps until it exits.
+run_step() {
+    "$@" &
+    child=$!
+    local result=0
+    wait "$child" || result=$?
+    child=''
+    return "$result"
+}
+child_active() {
+    # Plain jobs -p can retain completed jobs while an EXIT trap is running.
+    [[ "$(jobs -pr; jobs -ps)" == "$child" ]]
+}
+cleanup() {
+    local result=$?
+    local cleanup_result=0
+    trap - EXIT
+    trap '' TERM INT USR1
+    if [[ -n "$child" ]]; then
+        # The only asynchronous job is run_step. Use its jobspec, not a PID
+        # that Bash may already have reaped and the kernel may have reused.
+        if child_active && [[ "$(jobs -p %+ 2>/dev/null)" == "$child" ]]; then
+            kill -TERM %+ 2>/dev/null || true
+        fi
+        # Allow the builder to stop its daemons and remove root-owned storage
+        # before deleting the enclosing scratch directory.
+        local deadline=$((SECONDS + 150))
+        while child_active && [[ $SECONDS -lt $deadline ]]; do
+            sleep 0.2
+        done
+        if child_active; then
+            echo 'Workload child did not exit within the cleanup deadline; leaving its scratch directory' >&2
+            cleanup_result=1
+        else
+            wait "$child" 2>/dev/null || true
+            child=''
+        fi
+    fi
+    if [[ "$finished" != 1 ]]; then
+        python3 - "$RUN_DIR" "$result" <<'PY' || cleanup_result=1
+import json, os, pathlib, sys, time
+run = pathlib.Path(sys.argv[1])
+request = json.loads((run / 'request.json').read_text())
+result = {'schema_version': 1, 'status': 'failed', 'run_key': request['run_key'],
+          'source_sha': request['source_sha'], 'job_id': os.environ.get('SLURM_JOB_ID'),
+          'exit_code': int(sys.argv[2]), 'ended_at': time.time()}
+path = run / 'completed.json.tmp'
+path.write_text(json.dumps(result) + '\n')
+os.replace(path, run / 'completed.json')
+PY
+    fi
+    if [[ -z "$child" && -n "$scratch" && "$scratch" == /tmp/dynamo-rocm-* ]]; then
+        rm -rf -- "$scratch" || cleanup_result=1
+    fi
+    rm -f -- "$RUN_DIR/dynamo-test.building.sqsh" || cleanup_result=1
+    if [[ "$cleanup_result" == 0 ]]; then
+        echo 'Slurm workload cleanup complete'
+    else
+        echo 'Slurm workload cleanup incomplete' >&2
+    fi
+    if [[ "$result" == 0 ]]; then
+        result=$cleanup_result
+    fi
+    exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 124' USR1
+
+: "${SLURM_JOB_ID:?must run inside a Slurm allocation}"
+: "${SLURMD_NODENAME:?must execute on slurmd compute node}"
+: "${SLURM_JOB_NODELIST:?missing allocated node list}"
+: "${ROCR_VISIBLE_DEVICES:?missing Slurm GPU assignment}"
+[[ $(hostname -s) == "$SLURMD_NODENAME" ]]
+scontrol show hostnames "$SLURM_JOB_NODELIST" | grep -Fx -- "$SLURMD_NODENAME" >/dev/null
+[[ ${SLURM_RESTART_COUNT:-0} == 0 ]]
+[[ ${SLURM_CPUS_PER_TASK:-0} == 16 ]]
+export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
+python3 "$CONTROLLER/rocm/allocation.py" --run-dir "$RUN_DIR"
+scratch=$(mktemp -d "/tmp/dynamo-rocm-${SLURM_JOB_ID}-XXXXXXXX")
+mkdir -p "$ROOT/models"
+python3 "$CONTROLLER/slurm_verify.py" extract --run-dir "$RUN_DIR" --destination "$scratch/source"
+JOB_SOURCE="$scratch/source"
+COMMON=(srun --ntasks=1 --cpu-bind=cores --kill-on-bad-exit=1 --no-container-mount-home --no-container-entrypoint)
+TEST_SQSH="$RUN_DIR/dynamo-test.building.sqsh"
+[[ ! -e "$TEST_SQSH" ]]
+run_step python3 "$CONTROLLER/rocm/build_images.py" \
+    --source "$JOB_SOURCE" --results "$RUN_DIR" --scratch "$scratch"
+[[ -s "$TEST_SQSH" ]]
+python3 "$CONTROLLER/slurm_verify.py" image-manifest --run-dir "$RUN_DIR" --image "$TEST_SQSH" \
+    --build-manifest "$RUN_DIR/build-manifest.json" --output "$RUN_DIR/image-manifest.json"
+python3 "$CONTROLLER/slurm_verify.py" verify-image --run-dir "$RUN_DIR" --image "$TEST_SQSH" \
+    --manifest "$RUN_DIR/image-manifest.json"
+# Prepare the pinned model once in an allocated container, then remount read-only.
+run_step "${COMMON[@]}" --container-image="$TEST_SQSH" --container-env=ROCR_VISIBLE_DEVICES \
+    --container-mounts="$RUN_DIR:/results,$ROOT/models:/model-store" \
+    --container-workdir=/opt/dynamo \
+    /opt/dynamo/venv/bin/python3 /results/controller/rocm/prepare_models.py \
+    --cache-root /model-store --output /results/model-manifest.json
+MODEL_KEY=$(python3 - "$RUN_DIR/model-manifest.json" <<'PY'
+import json,re,sys
+from pathlib import Path
+key=json.loads(Path(sys.argv[1]).read_text())['cache_key']
+if not re.fullmatch('[0-9a-f]{64}',key): raise ValueError('invalid model cache key')
+print(key)
+PY
+)
+MODEL_CACHE="$ROOT/models/$MODEL_KEY"
+[[ -d "$MODEL_CACHE" ]]
+# Native MDC caching ignores XDG_CACHE_HOME. Bind only its cache directory;
+# preserve HOME and keep the user's actual home outside the container.
+[[ "${HOME:?}" =~ ^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$ ]]
+[[ "/$HOME/" != *"/../"* && "/$HOME/" != *"/./"* ]]
+mkdir -p "$scratch/mdc-cache"
+export HF_HOME=/models HF_HUB_CACHE=/models/hub HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+run_step "${COMMON[@]}" --container-image="$TEST_SQSH" \
+    --container-env=HOME,ROCR_VISIBLE_DEVICES,HF_HOME,HF_HUB_CACHE,HF_HUB_OFFLINE,TRANSFORMERS_OFFLINE \
+    --container-mounts="$JOB_SOURCE:/workspace,$RUN_DIR:/results,$MODEL_CACHE:/models:ro,$scratch/mdc-cache:$HOME/.cache/dynamo/mdc" \
+    --container-workdir=/workspace \
+    bash /results/controller/rocm/run-tests.sh --results /results
+python3 "$CONTROLLER/slurm_verify.py" workload --run-dir "$RUN_DIR" --runtime-dir "$RUN_DIR" --output "$RUN_DIR/completed.json"
+finished=1

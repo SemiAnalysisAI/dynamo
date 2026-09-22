@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 name: Copyright Checks
 
 on:
@@ -5,22 +7,20 @@ on:
 
 jobs:
   copyright-checks:
-      runs-on: ubuntu-24.04
-      container:
-        image: ghcr.io/${{ github.repository }}/helm-tester:0.1.1
-        options: --tty
-        volumes:
-        - ${{ github.workspace }}:/workspace
-      permissions:
-        contents: read
-        packages: read
-      steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Allowlist both variants of the mounted source directory.
-      - run: git config --global --add safe.directory /__w/dynamo/dynamo
-      - run: git config --global --add safe.directory /workspace
-      - run: pwsh /workspace/.github/workflows/copyright-check.ps1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # The checker compares header years with each file's last commit.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check copyright headers
+        # Git and PowerShell are included in the hosted Ubuntu runner image.
+        run: pwsh -NoProfile -File .github/workflows/copyright-check.ps1
         env:
           NVBUILD_VERBOSITY: DETAILED
-        timeout-minutes: 2
-        working-directory: /workspace
+        timeout-minutes: 15
