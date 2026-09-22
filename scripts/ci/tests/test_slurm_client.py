@@ -462,11 +462,56 @@ class ClientTests(unittest.TestCase):
     def test_remote_stage_publishes_verified_bytes(self):
         root = self.root / "dynamo-rocm-ci"
         stream, digest = self.package("source.tar", b"verified source")
-        result = remote.stage(root, "local-one", digest, stream)
+        # Some shared filesystems reject renaming a populated directory.
+        with patch.object(
+            remote.os, "rename", side_effect=PermissionError("Directory rename denied")
+        ):
+            result = remote.stage(root, "local-one", digest, stream)
         self.assertEqual(
             Path(result["run_dir"]).joinpath("source.tar").read_bytes(),
             b"verified source",
         )
+
+    def test_interrupted_extraction_consumes_attempt_without_reusing_partial_run(self):
+        root = self.root / "dynamo-rocm-ci"
+        target = root / "runs/local-one"
+        stream, digest = self.package("source.tar")
+
+        def interrupt_extraction(destination, **kwargs):
+            (destination / "source.tar").write_bytes(b"partial")
+            raise OSError("Extraction interrupted")
+
+        with (
+            patch.object(
+                tarfile.TarFile, "extractall", side_effect=interrupt_extraction
+            ),
+            self.assertRaisesRegex(OSError, "Extraction interrupted"),
+        ):
+            remote.stage(root, "local-one", digest, stream)
+        self.assertEqual((target / "source.tar").read_bytes(), b"partial")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list(root.glob(".stage-*")), [])
+
+        retry, digest = self.package("source.tar", b"replacement")
+        with self.assertRaisesRegex(ValueError, "Run already exists"):
+            remote.stage(root, "local-one", digest, retry)
+        self.assertEqual((target / "source.tar").read_bytes(), b"partial")
+
+    def test_run_reserved_during_upload_is_not_replaced(self):
+        root = self.root / "dynamo-rocm-ci"
+        target = root / "runs/local-one"
+        stream, digest = self.package("source.tar")
+
+        def reserve_during_upload(size):
+            if not target.exists():
+                target.mkdir()
+            return stream.read(size)
+
+        upload = Mock()
+        upload.read.side_effect = reserve_during_upload
+        with self.assertRaises(FileExistsError):
+            remote.stage(root, "local-one", digest, upload)
+        self.assertEqual(list(target.iterdir()), [])
 
     def test_remote_collection_excludes_non_evidence_and_links(self):
         (self.root / "request.json").write_text("{}")

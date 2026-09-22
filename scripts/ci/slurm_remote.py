@@ -94,8 +94,6 @@ def stage(root, key, digest, stream):
                 calculated.update(block)
         if calculated.hexdigest() != digest:
             raise ValueError("Transfer checksum mismatch")
-        unpack = temporary / "run"
-        unpack.mkdir(mode=0o700)
         with tarfile.open(package, "r:") as archive:
             seen = set()
             for member in archive.getmembers():
@@ -117,8 +115,11 @@ def stage(root, key, digest, stream):
                     "controller",
                 ):
                     raise ValueError("Unexpected staging entry")
-            archive.extractall(unpack, filter="data")
-        os.rename(unpack, target)
+            # Reserve the attempt without renaming a populated directory on
+            # shared storage. Partial extraction consumes this attempt; the
+            # client cannot start a job until staging returns successfully.
+            target.mkdir(mode=0o700, exist_ok=False)
+            archive.extractall(target, filter="data")
     return {"run_dir": str(target)}
 
 
