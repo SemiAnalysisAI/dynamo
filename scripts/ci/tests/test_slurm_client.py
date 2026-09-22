@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Offline staging and false-success regression cases for the SSH client."""
+"""Offline Actions identity, staging, finalization and false-success regressions."""
 
 import hashlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -53,9 +54,39 @@ class ClientTests(unittest.TestCase):
         )
         return source, client.git(source, "rev-parse", "HEAD").decode().strip()
 
+    def actions_environment(self, workspace=None, sha=None):
+        workspace = workspace or self.root / "workspace"
+        workspace.mkdir(exist_ok=True)
+        runner_temp = self.root / "runner-temp"
+        runner_temp.mkdir(exist_ok=True)
+        return {
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REF_TYPE": "branch",
+            "GITHUB_WORKSPACE": str(workspace),
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_SHA": sha or "a" * 40,
+            "GITHUB_WORKFLOW_SHA": sha or "a" * 40,
+            "GITHUB_RUN_ID": "12345",
+            "GITHUB_RUN_ATTEMPT": "2",
+            "SLURM_UID": "20011",
+            "PREFERRED_PARTITION": "compute-1",
+            "FALLBACK_PARTITION": "compute-0",
+        }
+
+    def actions_context(self, environment=None):
+        environment = environment or self.actions_environment()
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(
+                client, "REPO", Path(environment["GITHUB_WORKSPACE"]).resolve()
+            ),
+        ):
+            return client.ActionsContext.from_environment()
+
     def evidence(self):
         request = {
-            "run_key": "local-one",
+            "run_key": "gh-12345-2",
             "source_sha": "a" * 40,
             "archive_sha256": "b" * 64,
             "controller_sha": "c" * 40,
@@ -69,12 +100,12 @@ class ClientTests(unittest.TestCase):
             "controller-result": {"status": "terminal"},
             "receipt": {
                 "job_id": "123",
-                "run_key": "local-one",
+                "run_key": "gh-12345-2",
                 "source_sha": "a" * 40,
             },
             "terminal": {
                 "job_id": "123",
-                "run_key": "local-one",
+                "run_key": "gh-12345-2",
                 "state": "COMPLETED",
                 "exit_code": "0:0",
                 "restarts": 0,
@@ -99,11 +130,11 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(client.verdict(self.root)["status"], "passed")
             verify.assert_called_once()
 
-    def test_collected_request_cannot_replace_local_intent(self):
+    def test_collected_request_cannot_replace_actions_intent(self):
         values = self.evidence()
         values["request"]["source_sha"] = "0" * 40
         client.atomic_json(self.root / "request.json", values["request"])
-        with self.assertRaisesRegex(ValueError, "original local request"):
+        with self.assertRaisesRegex(ValueError, "original Actions request"):
             client.verdict(self.root)
 
     def test_missing_image_or_original_request_fails(self):
@@ -141,16 +172,190 @@ class ClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "clean"):
             client.source_archive(source, self.root / "source.tar", sha)
 
-    def test_malicious_ssh_alias_rejected(self):
-        for alias in (
-            "-oProxyCommand=evil",
-            "host;echo bad",
-            "host\nother",
-            "$(id)",
-            "host withspace",
+    def test_actions_identity_and_storage_are_derived_from_runner(self):
+        context = self.actions_context()
+        self.assertEqual(context.sha, "a" * 40)
+        self.assertEqual(context.run_key, "gh-12345-2")
+        self.assertEqual(context.expected_uid, 20011)
+        self.assertEqual(context.preferred_partition, "compute-1")
+        self.assertEqual(context.fallback_partition, "compute-0")
+        self.assertEqual(context.output, context.runner_temp / "dynamo-rocm/evidence")
+        connection = client.Connection(context)
+        self.assertEqual(
+            connection.prefix[-3:],
+            [
+                "-F",
+                str(context.runner_temp / "dynamo-rocm/ssh/config"),
+                "ci-slurm-login",
+            ],
+        )
+
+    def test_only_workflow_dispatch_context_is_accepted(self):
+        environment = self.actions_environment()
+        for field, value in (
+            ("GITHUB_ACTIONS", "false"),
+            ("GITHUB_ACTIONS", ""),
+            ("GITHUB_EVENT_NAME", "pull_request"),
+            ("GITHUB_EVENT_NAME", "pull_request_target"),
+            ("GITHUB_REF_TYPE", "tag"),
+            ("GITHUB_RUN_ID", "123;other"),
+            ("GITHUB_RUN_ATTEMPT", "0"),
+            ("GITHUB_SHA", "main"),
+            ("GITHUB_WORKFLOW_SHA", "b" * 40),
+            ("SLURM_UID", "0"),
+            ("PREFERRED_PARTITION", "auto"),
+            ("FALLBACK_PARTITION", "compute-1"),
+            ("FALLBACK_PARTITION", "compute-0,other"),
         ):
-            with self.subTest(alias=alias), self.assertRaises(ValueError):
-                client.Connection(SimpleNamespace(ssh_host=alias, ssh_config=None))
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                self.actions_context({**environment, field: value})
+
+    def test_runner_temp_cannot_overlap_checkout(self):
+        environment = self.actions_environment()
+        for directory in (Path(environment["GITHUB_WORKSPACE"]), self.root):
+            with self.subTest(directory=directory), self.assertRaisesRegex(
+                ValueError, "separate"
+            ):
+                self.actions_context({**environment, "RUNNER_TEMP": str(directory)})
+
+    def test_driver_cannot_run_from_a_different_checkout(self):
+        environment = self.actions_environment()
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(client, "REPO", self.root / "different"),
+            self.assertRaisesRegex(ValueError, "GITHUB_WORKSPACE checkout"),
+        ):
+            client.ActionsContext.from_environment()
+
+    def test_legacy_actions_and_arbitrary_cli_options_are_rejected(self):
+        for arguments in (
+            ["status"],
+            ["resume"],
+            ["setup-ssh"],
+            ["run", "--source-sha", "a" * 40],
+            ["run", "--source-dir", str(self.root)],
+            ["run", "--reuse-image-sha", "b" * 64],
+            ["finalize", "--run-key", "other"],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                patch.object(sys, "argv", ["slurm_client.py", *arguments]),
+                patch.object(sys, "stderr", io.StringIO()),
+                self.assertRaises(SystemExit) as error,
+            ):
+                client.main()
+            self.assertEqual(error.exception.code, 2)
+
+    def test_setup_and_cleanup_use_only_the_scoped_ssh_directory(self):
+        environment = self.actions_environment()
+        context = self.actions_context(environment)
+        for action, function in (("setup", "setup_ssh"), ("cleanup", "cleanup_ssh")):
+            with (
+                self.subTest(action=action),
+                patch.object(sys, "argv", ["slurm_client.py", action]),
+                patch.object(
+                    client.ActionsContext, "from_environment", return_value=context
+                ),
+                patch.object(client, function) as operation,
+                patch.object(client, "Connection") as connection,
+            ):
+                client.main()
+                operation.assert_called_once_with(context.ssh_directory)
+                connection.assert_not_called()
+
+    def test_actions_run_builds_exact_checkout_without_image_reuse(self):
+        source, sha = self.checkout(
+            {"file": b"source", "scripts/ci/helper.py": b"# helper\n"}
+        )
+        context = self.actions_context(self.actions_environment(source, sha))
+        remote_run = "/remote/runs/" + context.run_key
+
+        class FakeConnection:
+            deadline = client.time.monotonic() + client.RUN_TIMEOUT
+
+            def call(self, _words, **kwargs):
+                with tarfile.open(fileobj=kwargs["stdin"], mode="r:") as archive:
+                    self.request = json.load(archive.extractfile("request.json"))
+                return SimpleNamespace(
+                    stdout=json.dumps({"run_dir": remote_run}).encode()
+                )
+
+        connection = FakeConnection()
+        with (
+            patch.object(client, "REPO", source),
+            patch.object(client, "remote_action") as action,
+            patch.object(client, "wait_for_run") as wait,
+            patch.object(sys, "stdout", io.StringIO()),
+        ):
+            client.start_run(context, connection, {"root": "/remote"})
+        self.assertEqual(connection.request["source_sha"], sha)
+        self.assertEqual(connection.request["controller_sha"], sha)
+        self.assertEqual(connection.request["run_key"], "gh-12345-2")
+        self.assertEqual(connection.request["partition"], "auto")
+        self.assertIsNone(connection.request["reuse_image_sha"])
+        self.assertEqual(
+            client.read_json(context.output / "expected-request.json"),
+            connection.request,
+        )
+        action.assert_called_once_with(connection, remote_run, "start")
+        wait.assert_called_once_with(
+            connection, remote_run, context.output, client.RUN_TIMEOUT
+        )
+
+    def test_finalize_without_submission_does_not_connect(self):
+        context = self.actions_context()
+        with patch.object(client, "preflight") as preflight:
+            client.finalize_run(context, SimpleNamespace(deadline=None))
+        preflight.assert_not_called()
+        self.assertEqual(
+            client.read_json(context.output / "finalize.json"),
+            {"status": "not-submitted"},
+        )
+
+    def saved_actions_run(self, context):
+        context.output.mkdir(parents=True)
+        saved = {
+            "run_key": context.run_key,
+            "source_sha": context.sha,
+            "remote_run": "/remote/runs/" + context.run_key,
+            "ssh_host": "ci-slurm-login",
+        }
+        client.atomic_json(context.output / "client.json", saved)
+        return saved
+
+    def test_finalize_cancels_active_run_and_collects_even_on_failure(self):
+        context = self.actions_context()
+        saved = self.saved_actions_run(context)
+        connection = SimpleNamespace(deadline=None)
+        with (
+            patch.object(client, "preflight", return_value={"root": "/remote"}),
+            patch.object(
+                client, "remote_action", side_effect=TimeoutError("disconnect")
+            ) as action,
+            patch.object(client, "collect") as collect,
+            self.assertRaises(TimeoutError),
+        ):
+            client.finalize_run(context, connection)
+        action.assert_called_once_with(
+            connection, saved["remote_run"], "finalize", 180, cancel=True
+        )
+        collect.assert_called_once_with(
+            connection, saved["remote_run"], context.output, timeout=60
+        )
+        self.assertIsNotNone(connection.deadline)
+
+    def test_finalize_refuses_a_different_actions_attempt(self):
+        context = self.actions_context()
+        saved = self.saved_actions_run(context)
+        saved["run_key"] = "gh-12345-1"
+        client.atomic_json(context.output / "client.json", saved)
+        with (
+            patch.object(client, "preflight", return_value={"root": "/remote"}),
+            patch.object(client, "remote_action") as action,
+            self.assertRaisesRegex(ValueError, "Actions run identity"),
+        ):
+            client.finalize_run(context, SimpleNamespace(deadline=None))
+        action.assert_not_called()
 
     def test_failed_terminal_states_never_pass(self):
         for state in ("FAILED", "CANCELLED", "TIMEOUT", "RUNNING", None):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Stage reviewed source, control one Slurm allocation, and collect its evidence."""
+"""Run the ROCm Slurm qualification from a GitHub Actions workflow dispatch."""
 
 import argparse
 import hashlib
@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from slurm_common import (
@@ -31,6 +32,9 @@ from slurm_verify import verify_collected
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
+SSH_HOST = "ci-slurm-login"
+RUN_TIMEOUT = 17100
+FINALIZE_TIMEOUT = 240
 PYTHON = [
     "env",
     "-u",
@@ -45,6 +49,77 @@ PYTHON = [
     "python3",
     "-B",
 ]
+
+
+@dataclass(frozen=True)
+class ActionsContext:
+    workspace: Path
+    runner_temp: Path
+    sha: str
+    run_key: str
+    expected_uid: int
+    preferred_partition: str
+    fallback_partition: str
+
+    @property
+    def ssh_directory(self):
+        return self.runner_temp / "dynamo-rocm" / "ssh"
+
+    @property
+    def output(self):
+        return self.runner_temp / "dynamo-rocm" / "evidence"
+
+    @classmethod
+    def from_environment(cls):
+        if (
+            os.environ.get("GITHUB_ACTIONS") != "true"
+            or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or os.environ.get("GITHUB_REF_TYPE") != "branch"
+        ):
+            raise ValueError(
+                "This driver requires a GitHub Actions workflow_dispatch on a branch"
+            )
+        paths = {}
+        for name in ("GITHUB_WORKSPACE", "RUNNER_TEMP"):
+            path = Path(os.environ[name])
+            if not path.is_absolute() or not path.is_dir():
+                raise ValueError(f"{name} must be an existing absolute directory")
+            paths[name] = path.resolve()
+        workspace = paths["GITHUB_WORKSPACE"]
+        runner_temp = paths["RUNNER_TEMP"]
+        if workspace != REPO:
+            raise ValueError("The driver must run from the GITHUB_WORKSPACE checkout")
+        if runner_temp.is_relative_to(workspace) or workspace.is_relative_to(
+            runner_temp
+        ):
+            raise ValueError("RUNNER_TEMP must be separate from GITHUB_WORKSPACE")
+        sha = os.environ["GITHUB_SHA"]
+        validate_sha(sha)
+        if os.environ.get("GITHUB_WORKFLOW_SHA") != sha:
+            raise ValueError(
+                "The workflow and checkout must use the same GitHub commit"
+            )
+        for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "SLURM_UID"):
+            if not re.fullmatch(r"[1-9][0-9]*", os.environ[name]):
+                raise ValueError(f"{name} must be a positive integer")
+        run_key = f"gh-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+        validate_run_key(run_key)
+        preferred = os.environ.get("PREFERRED_PARTITION", "compute-1")
+        fallback = os.environ.get("FALLBACK_PARTITION", "compute-0")
+        for name in (preferred, fallback):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name):
+                raise ValueError("Invalid partition name")
+        if "auto" in (preferred, fallback) or preferred == fallback:
+            raise ValueError("Preferred and fallback partitions must be distinct names")
+        return cls(
+            workspace,
+            runner_temp,
+            sha,
+            run_key,
+            int(os.environ["SLURM_UID"]),
+            preferred,
+            fallback,
+        )
 
 
 def run_checked(command, *, timeout=60, **kwargs):
@@ -64,7 +139,7 @@ def clean_checkout(path, sha):
 
 
 def source_archive(source, destination, sha):
-    """Archive tracked, materialized bytes identically on macOS and Linux."""
+    """Archive tracked, materialized checkout bytes with deterministic metadata."""
     clean_checkout(source, sha)
     entries = []
     with tarfile.open(destination, "w", format=tarfile.PAX_FORMAT) as archive:
@@ -144,9 +219,7 @@ def stage_controller(destination):
 
 
 class Connection:
-    def __init__(self, args):
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]*", args.ssh_host):
-            raise ValueError("Invalid SSH host alias")
+    def __init__(self, context):
         self.prefix = [
             "ssh",
             "-T",
@@ -160,10 +233,12 @@ class Connection:
             "ServerAliveInterval=30",
             "-o",
             "ServerAliveCountMax=3",
+            "-o",
+            "Compression=yes",
+            "-F",
+            str(context.ssh_directory / "config"),
+            SSH_HOST,
         ]
-        if args.ssh_config:
-            self.prefix += ["-F", str(Path(args.ssh_config).resolve())]
-        self.prefix += [args.ssh_host]
         self.deadline = None
 
     def call(self, words, *, timeout=60, **kwargs):
@@ -189,12 +264,9 @@ def remote_program():
     return (HERE / "slurm_remote.py").read_text()
 
 
-def preflight(connection, args):
-    image = args.reuse_image_sha or ""
-    if image:
-        validate_sha(image, 64)
+def preflight(connection, context):
     return connection.python(
-        remote_program(), "preflight", str(args.expected_uid), image
+        remote_program(), "preflight", str(context.expected_uid), ""
     )
 
 
@@ -242,7 +314,7 @@ def verdict(output):
     request = read_json(output / "request.json")
     intended = output / "expected-request.json"
     if request != read_json(intended):
-        raise ValueError("Collected request differs from the original local request")
+        raise ValueError("Collected request differs from the original Actions request")
     receipt = read_json(output / "receipt.json")
     terminal = read_json(output / "terminal.json")
     waiter = read_json(output / "wait-result.json")
@@ -285,11 +357,8 @@ def verdict(output):
     validate_sha(image["sqsh_sha256"], 64)
     if workload.get("sqsh_sha256") != image["sqsh_sha256"]:
         raise ValueError("Workload image identity mismatch")
-    if (
-        request.get("reuse_image_sha")
-        and request["reuse_image_sha"] != image["sqsh_sha256"]
-    ):
-        raise ValueError("Reused image differs from requested digest")
+    if request.get("reuse_image_sha"):
+        raise ValueError("Actions qualification requires a newly built image")
     verify_collected(request, output)
     return {"status": "passed", "job_id": expected, "run_key": request["run_key"]}
 
@@ -333,55 +402,60 @@ def wait_for_run(connection, remote_run, output, timeout):
                 )
             last_collection = time.monotonic()
         time.sleep(min(20, max(0, deadline - time.monotonic())))
-    raise TimeoutError("Client deadline reached; use finalize/status with this run key")
+    raise TimeoutError(
+        "Client deadline reached; the Actions finalizer must collect evidence"
+    )
 
 
-def start_run(args, connection, info):
-    source = Path(args.source_dir).resolve()
-    output = Path(args.output).resolve()
-    clean_checkout(REPO, args.controller_sha)
-    clean_checkout(source, args.source_sha)
-    if output.is_relative_to(REPO) or output.is_relative_to(source):
-        raise ValueError("Evidence must be outside both clean checkouts")
+def start_run(context, connection, info):
+    source = context.workspace
+    output = context.output
+    clean_checkout(source, context.sha)
     output.mkdir(parents=True, exist_ok=True)
-    (output / "run-key.txt").write_text(args.run_key + "\n")
-    remote_run = str(PurePosixPath(info["root"]) / "runs" / args.run_key)
+    if (output / "client.json").exists():
+        raise ValueError("This Actions attempt already started a Slurm run")
+    (output / "run-key.txt").write_text(context.run_key + "\n")
+    remote_run = str(PurePosixPath(info["root"]) / "runs" / context.run_key)
     atomic_json(
         output / "client.json",
         {
-            "run_key": args.run_key,
+            "run_key": context.run_key,
             "remote_run": remote_run,
-            "ssh_host": args.ssh_host,
+            "ssh_host": SSH_HOST,
+            "source_sha": context.sha,
             "started_at": time.time(),
             "deadline_at": time.time() + max(0, connection.deadline - time.monotonic()),
         },
     )
-    print(f"Run {args.run_key}; evidence {output}; remote {remote_run}", flush=True)
-    with tempfile.TemporaryDirectory(prefix="slurm-source-") as scratch:
+    print(f"Run {context.run_key}; evidence {output}; remote {remote_run}", flush=True)
+    with tempfile.TemporaryDirectory(
+        prefix="slurm-source-", dir=context.runner_temp
+    ) as scratch:
         stage = Path(scratch) / "run"
         stage.mkdir()
-        source_manifest = source_archive(source, stage / "source.tar", args.source_sha)
+        source_manifest = source_archive(source, stage / "source.tar", context.sha)
         atomic_json(stage / "source-manifest.json", source_manifest)
         bundle_sha = stage_controller(stage / "controller")
+        clean_checkout(source, context.sha)
         request = {
             "schema_version": 1,
-            "run_key": args.run_key,
-            "source_sha": args.source_sha,
+            "run_key": context.run_key,
+            "source_sha": context.sha,
             "archive_sha256": source_manifest["archive_sha256"],
-            "controller_sha": args.controller_sha,
+            "controller_sha": context.sha,
             "controller_bundle_sha256": bundle_sha,
-            "reuse_image_sha": args.reuse_image_sha,
+            "reuse_image_sha": None,
             "suite": "aggregate",
-            "partition": args.partition,
-            "preferred_partition": args.preferred_partition,
-            "fallback_partition": args.fallback_partition,
+            "partition": "auto",
+            "preferred_partition": context.preferred_partition,
+            "fallback_partition": context.fallback_partition,
             "gpus": 1,
             "cpus": 16,
             "mem_gib": 64,
             "time_limit_minutes": 240,
             "queue_timeout_seconds": 1800,
-            "controller_timeout_seconds": 17100,
-            "expected_uid": args.expected_uid,
+            "controller_timeout_seconds": RUN_TIMEOUT,
+            "expected_uid": context.expected_uid,
         }
         atomic_json(stage / "request.json", request)
         atomic_json(output / "request.json", request)
@@ -397,7 +471,7 @@ def start_run(args, connection, info):
                     "-c",
                     remote_program(),
                     "stage",
-                    args.run_key,
+                    context.run_key,
                     sha256_file(package),
                 ],
                 timeout=900,
@@ -408,7 +482,33 @@ def start_run(args, connection, info):
         if json.loads(response.stdout)["run_dir"] != remote_run:
             raise ValueError("Remote staging path mismatch")
     remote_action(connection, remote_run, "start")
-    wait_for_run(connection, remote_run, output, 17100)
+    wait_for_run(connection, remote_run, output, RUN_TIMEOUT)
+
+
+def finalize_run(context, connection):
+    output = context.output
+    output.mkdir(parents=True, exist_ok=True)
+    if not (output / "client.json").exists():
+        atomic_json(output / "finalize.json", {"status": "not-submitted"})
+        return
+    connection.deadline = time.monotonic() + FINALIZE_TIMEOUT
+    info = preflight(connection, context)
+    remote_run = str(PurePosixPath(info["root"]) / "runs" / context.run_key)
+    saved = read_json(output / "client.json")
+    for key, expected in {
+        "run_key": context.run_key,
+        "source_sha": context.sha,
+        "remote_run": remote_run,
+        "ssh_host": SSH_HOST,
+    }.items():
+        if saved.get(key) != expected:
+            raise ValueError(f"Saved Actions run identity mismatch: {key}")
+    try:
+        state = remote_action(connection, remote_run, "finalize", 180, cancel=True)
+        print(json.dumps(state), flush=True)
+        atomic_json(output / "client-status.json", state)
+    finally:
+        collect(connection, remote_run, output, timeout=60)
 
 
 def main():
@@ -416,103 +516,23 @@ def main():
         raise ValueError("The Slurm client requires Python 3.12 or newer")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "action",
-        choices=(
-            "setup-ssh",
-            "cleanup-ssh",
-            "preflight",
-            "run",
-            "status",
-            "resume",
-            "finalize",
-        ),
+        "action", choices=("setup", "preflight", "run", "finalize", "cleanup")
     )
-    parser.add_argument("--directory")
-    parser.add_argument("--ssh-host", default="slurm-login")
-    parser.add_argument("--ssh-config")
-    parser.add_argument("--expected-uid", type=int)
-    parser.add_argument("--run-key")
-    parser.add_argument("--output")
-    parser.add_argument("--source-dir")
-    parser.add_argument("--source-sha")
-    parser.add_argument("--controller-sha")
-    parser.add_argument("--reuse-image-sha")
-    parser.add_argument("--suite", choices=("aggregate",), default="aggregate")
-    parser.add_argument("--partition", default="auto")
-    parser.add_argument("--preferred-partition", default="compute-1")
-    parser.add_argument("--fallback-partition", default="compute-0")
-    parser.add_argument("--gpus", type=int, choices=(1,), default=1)
-    parser.add_argument("--queue-timeout", choices=("30m",), default="30m")
-    parser.add_argument("--time-limit", choices=("04:00:00",), default="04:00:00")
-    parser.add_argument("--controller-timeout", choices=("285m",), default="285m")
-    parser.add_argument("--deadline-seconds", type=int, default=240)
-    parser.add_argument("--cancel-if-active", action="store_true")
     args = parser.parse_args()
-    if args.action in ("setup-ssh", "cleanup-ssh"):
-        if not args.directory:
-            parser.error("--directory is required")
-        (setup_ssh if args.action == "setup-ssh" else cleanup_ssh)(args.directory)
+    context = ActionsContext.from_environment()
+    if args.action in ("setup", "cleanup"):
+        (setup_ssh if args.action == "setup" else cleanup_ssh)(context.ssh_directory)
         return
-    if args.expected_uid is None or args.expected_uid < 1:
-        parser.error(
-            "--expected-uid must identify the configured non-root Slurm account"
-        )
-    for name in (args.partition, args.preferred_partition, args.fallback_partition):
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name):
-            parser.error("invalid partition name")
-    if (
-        "auto" in (args.preferred_partition, args.fallback_partition)
-        or args.preferred_partition == args.fallback_partition
-    ):
-        parser.error(
-            "preferred and fallback partitions must be distinct explicit names"
-        )
-    connection = Connection(args)
+    connection = Connection(context)
+    if args.action == "finalize":
+        finalize_run(context, connection)
+        return
+    connection.deadline = time.monotonic() + RUN_TIMEOUT
+    info = preflight(connection, context)
     if args.action == "preflight":
-        print(json.dumps(preflight(connection, args)))
-        return
-    validate_run_key(args.run_key)
-    if not args.output:
-        parser.error("--output is required")
-    output = Path(args.output).resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    if args.action == "finalize" and not (output / "client.json").exists():
-        atomic_json(output / "finalize.json", {"status": "not-submitted"})
-        return
-    if args.action == "run":
-        connection.deadline = time.monotonic() + 17100
-    elif args.action == "finalize":
-        connection.deadline = time.monotonic() + args.deadline_seconds
-    elif args.action == "resume":
-        saved = read_json(output / "client.json")
-        expires = saved.get("deadline_at", saved["started_at"] + 17100)
-        connection.deadline = time.monotonic() + max(0, expires - time.time())
-    info = preflight(connection, args)
-    remote_run = str(PurePosixPath(info["root"]) / "runs" / args.run_key)
-    if args.action == "run":
-        if not all((args.source_dir, args.source_sha, args.controller_sha)):
-            parser.error("run requires --source-dir, --source-sha and --controller-sha")
-        start_run(args, connection, info)
-        return
-    if not 1 <= args.deadline_seconds <= 240:
-        parser.error("--deadline-seconds must be 1..240")
-    try:
-        remote_budget = (
-            min(args.deadline_seconds, 180)
-            if args.action == "finalize"
-            else args.deadline_seconds
-        )
-        state = remote_action(
-            connection, remote_run, args.action, remote_budget, args.cancel_if_active
-        )
-        print(json.dumps(state), flush=True)
-        atomic_json(output / "client-status.json", state)
-    finally:
-        if args.action == "finalize":
-            collect(connection, remote_run, output, timeout=60)
-    if args.action == "resume":
-        remaining = max(0, connection.deadline - time.monotonic())
-        wait_for_run(connection, remote_run, output, remaining)
+        print(json.dumps(info))
+    else:
+        start_run(context, connection, info)
 
 
 if __name__ == "__main__":
