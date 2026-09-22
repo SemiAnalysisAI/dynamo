@@ -409,17 +409,14 @@ def start_run(context, connection, info):
         raise ValueError("This Actions attempt already started a Slurm run")
     (output / "run-key.txt").write_text(context.run_key + "\n")
     remote_run = str(PurePosixPath(info["root"]) / "runs" / context.run_key)
-    atomic_json(
-        output / "client.json",
-        {
-            "run_key": context.run_key,
-            "remote_run": remote_run,
-            "ssh_host": SSH_HOST,
-            "source_sha": context.sha,
-            "started_at": time.time(),
-            "deadline_at": time.time() + max(0, connection.deadline - time.monotonic()),
-        },
-    )
+    client_state = {
+        "run_key": context.run_key,
+        "remote_run": remote_run,
+        "ssh_host": SSH_HOST,
+        "source_sha": context.sha,
+        "started_at": time.time(),
+        "deadline_at": time.time() + max(0, connection.deadline - time.monotonic()),
+    }
     print(f"Run {context.run_key}; evidence {output}; remote {remote_run}", flush=True)
     with tempfile.TemporaryDirectory(
         prefix="slurm-source-", dir=context.runner_temp
@@ -472,6 +469,8 @@ def start_run(context, connection, info):
             )
         if json.loads(response.stdout)["run_dir"] != remote_run:
             raise ValueError("Remote staging path mismatch")
+    # Finalization needs a staged controller; arm it before start can submit a job.
+    atomic_json(output / "client.json", client_state)
     remote_action(connection, remote_run, "start")
     wait_for_run(connection, remote_run, output, RUN_TIMEOUT)
 

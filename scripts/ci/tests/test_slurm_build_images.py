@@ -5,9 +5,11 @@
 import getpass
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -234,6 +236,68 @@ class ImageBuildTest(unittest.TestCase):
             build_images.record_image(
                 self.daemon, self.test["Id"], self.results, self.scratch
             )
+
+
+class BuildCancellationTest(unittest.TestCase):
+    def test_signals_allow_cleanup_to_finish_and_preserve_first_exit_code(self):
+        # Run real signal handlers in a separate interpreter. No daemon, root
+        # privileges, timing assumptions, or GPU allocation are required.
+        program = textwrap.dedent(
+            """\
+            import os
+            import signal
+            import sys
+            sys.path.insert(0, sys.argv[1])
+            from rocm import build_images
+            from rocm.docker_daemon import DockerDaemon
+
+            first_signal = int(sys.argv[2])
+
+            def build(source, results, scratch):
+                daemon = DockerDaemon(scratch, results / 'daemon.log')
+                def cleanup():
+                    print('cleanup-start', flush=True)
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    if first_signal:
+                        os.kill(os.getpid(), signal.SIGINT)
+                    print('cleanup-finished', flush=True)
+                daemon._cleanup_owned_resources = cleanup
+                try:
+                    if first_signal:
+                        os.kill(os.getpid(), first_signal)
+                finally:
+                    daemon._cleanup()
+                print('incorrectly-continued-build', flush=True)
+
+            build_images.build_images = build
+            sys.argv = ['build_images.py', '--source', '.', '--results', '.', '--scratch', '.']
+            build_images.main()
+            print('incorrectly-continued-main', flush=True)
+            """
+        )
+        for first_signal, exit_code in (
+            (0, 143),
+            (signal.SIGTERM, 143),
+            (signal.SIGINT, 130),
+        ):
+            with self.subTest(first_signal=first_signal):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        program,
+                        str(Path(build_images.__file__).resolve().parents[1]),
+                        str(first_signal),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, exit_code, result.stderr)
+                self.assertEqual(
+                    result.stdout.splitlines(), ["cleanup-start", "cleanup-finished"]
+                )
 
 
 if __name__ == "__main__":

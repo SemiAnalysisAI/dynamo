@@ -25,15 +25,37 @@ run_step() {
     child=''
     return "$result"
 }
+child_active() {
+    # Plain jobs -p can retain completed jobs while an EXIT trap is running.
+    [[ "$(jobs -pr; jobs -ps)" == "$child" ]]
+}
 cleanup() {
     local result=$?
-    trap - EXIT TERM INT USR1
+    local cleanup_result=0
+    trap - EXIT
+    trap '' TERM INT USR1
     if [[ -n "$child" ]]; then
-        kill -TERM "$child" 2>/dev/null || true
-        # srun forwards TERM to its step; Slurm's allocation timeout remains the backstop.
+        # The only asynchronous job is run_step. Use its jobspec, not a PID
+        # that Bash may already have reaped and the kernel may have reused.
+        if child_active && [[ "$(jobs -p %+ 2>/dev/null)" == "$child" ]]; then
+            kill -TERM %+ 2>/dev/null || true
+        fi
+        # Allow the builder to stop its daemons and remove root-owned storage
+        # before deleting the enclosing scratch directory.
+        local deadline=$((SECONDS + 150))
+        while child_active && [[ $SECONDS -lt $deadline ]]; do
+            sleep 0.2
+        done
+        if child_active; then
+            echo 'Workload child did not exit within the cleanup deadline; leaving its scratch directory' >&2
+            cleanup_result=1
+        else
+            wait "$child" 2>/dev/null || true
+            child=''
+        fi
     fi
     if [[ "$finished" != 1 ]]; then
-        python3 - "$RUN_DIR" "$result" <<'PY'
+        python3 - "$RUN_DIR" "$result" <<'PY' || cleanup_result=1
 import json, os, pathlib, sys, time
 run = pathlib.Path(sys.argv[1])
 request = json.loads((run / 'request.json').read_text())
@@ -45,10 +67,18 @@ path.write_text(json.dumps(result) + '\n')
 os.replace(path, run / 'completed.json')
 PY
     fi
-    if [[ -n "$scratch" && "$scratch" == /tmp/dynamo-rocm-* ]]; then
-        rm -rf -- "$scratch"
+    if [[ -z "$child" && -n "$scratch" && "$scratch" == /tmp/dynamo-rocm-* ]]; then
+        rm -rf -- "$scratch" || cleanup_result=1
     fi
-    rm -f -- "$RUN_DIR/dynamo-test.building.sqsh"
+    rm -f -- "$RUN_DIR/dynamo-test.building.sqsh" || cleanup_result=1
+    if [[ "$cleanup_result" == 0 ]]; then
+        echo 'Slurm workload cleanup complete'
+    else
+        echo 'Slurm workload cleanup incomplete' >&2
+    fi
+    if [[ "$result" == 0 ]]; then
+        result=$cleanup_result
+    fi
     exit "$result"
 }
 trap cleanup EXIT

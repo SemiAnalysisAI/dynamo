@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import slurm_client as client
@@ -253,21 +253,30 @@ class ClientTests(unittest.TestCase):
         )
         context = self.actions_context(self.actions_environment(source, sha))
         remote_run = "/remote/runs/" + context.run_key
+        marker = context.output / "client.json"
+        test_case = self
 
         class FakeConnection:
             deadline = client.time.monotonic() + client.RUN_TIMEOUT
 
             def call(self, _words, **kwargs):
+                test_case.assertFalse(marker.exists())
                 with tarfile.open(fileobj=kwargs["stdin"], mode="r:") as archive:
                     self.request = json.load(archive.extractfile("request.json"))
                 return SimpleNamespace(
                     stdout=json.dumps({"run_dir": remote_run}).encode()
                 )
 
+        def check_start(*_args):
+            saved = client.read_json(marker)
+            self.assertEqual(saved["remote_run"], remote_run)
+            self.assertEqual(saved["run_key"], context.run_key)
+            self.assertEqual(saved["source_sha"], sha)
+
         connection = FakeConnection()
         with (
             patch.object(client, "REPO", source),
-            patch.object(client, "remote_action") as action,
+            patch.object(client, "remote_action", side_effect=check_start) as action,
             patch.object(client, "wait_for_run") as wait,
             patch.object(sys, "stdout", io.StringIO()),
         ):
@@ -282,6 +291,38 @@ class ClientTests(unittest.TestCase):
         action.assert_called_once_with(connection, remote_run, "start")
         wait.assert_called_once_with(
             connection, remote_run, context.output, client.RUN_TIMEOUT
+        )
+
+    def test_interrupted_stage_never_arms_finalization_or_starts_job(self):
+        source, sha = self.checkout(
+            {"file": b"source", "scripts/ci/helper.py": b"# helper\n"}
+        )
+        context = self.actions_context(self.actions_environment(source, sha))
+        connection = SimpleNamespace(
+            deadline=client.time.monotonic() + client.RUN_TIMEOUT,
+            call=Mock(side_effect=subprocess.TimeoutExpired("ssh", 900)),
+        )
+        with (
+            patch.object(client, "REPO", source),
+            patch.object(client, "remote_action") as action,
+            patch.object(client, "wait_for_run") as wait,
+            patch.object(sys, "stdout", io.StringIO()),
+            self.assertRaises(subprocess.TimeoutExpired),
+        ):
+            client.start_run(context, connection, {"root": "/remote"})
+        self.assertFalse((context.output / "client.json").exists())
+        action.assert_not_called()
+        wait.assert_not_called()
+        with (
+            patch.object(client, "preflight") as preflight,
+            patch.object(client, "collect") as collect,
+        ):
+            client.finalize_run(context, connection)
+        preflight.assert_not_called()
+        collect.assert_not_called()
+        self.assertEqual(
+            client.read_json(context.output / "finalize.json"),
+            {"status": "not-submitted"},
         )
 
     def test_finalize_without_submission_does_not_connect(self):

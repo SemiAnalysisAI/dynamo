@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -315,6 +316,17 @@ class DockerDaemon:
             process.wait(timeout=5)
 
     def _cleanup(self):
+        # Slurm and the batch shell can both signal this process. Defer those
+        # signals until owned resources are gone, including on normal exit.
+        previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT}
+        )
+        try:
+            self._cleanup_owned_resources()
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+    def _cleanup_owned_resources(self):
         try:
             if self.directory is not None:
                 try:
@@ -350,6 +362,7 @@ class DockerDaemon:
                     check=True,
                     timeout=60,
                 )
+                print("Private Docker cleanup complete", flush=True)
         finally:
             if self._log is not None:
                 self._log.close()

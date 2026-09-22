@@ -255,8 +255,13 @@ def main():
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--scratch", type=Path, required=True)
     args = parser.parse_args()
+    terminating = False
 
     def terminate(signum, _frame):
+        nonlocal terminating
+        if terminating:
+            return
+        terminating = True
         raise SystemExit(128 + signum)
 
     for signum in (signal.SIGTERM, signal.SIGINT):
