@@ -397,7 +397,8 @@ def monitor(run):
         "--cpus-per-task=16",
         "--mem=64G",
         "--time=04:00:00",
-        "--signal=B:USR1@120",
+        # Allow 150s for child shutdown plus 90s for the remaining batch cleanup.
+        "--signal=B:USR1@240",
         "--job-name=dynamo-" + req["run_key"],
         "--comment=" + req["run_key"],
         "--output=" + str(run / "slurm.log"),

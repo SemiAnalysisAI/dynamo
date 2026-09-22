@@ -17,6 +17,28 @@ BUILDX_VERSION = "v0.37.1"
 BUILDX_SHA256 = "9447199cdb435f25880548343c128a4b6650e8891ee598905d8d29d39a8e359b"
 
 
+def mountpoints_below(contents: str, directory: Path) -> list[Path]:
+    """Read kernel mountinfo paths without resolving through mounted storage."""
+    mounts = []
+    for line in contents.splitlines():
+        fields = line.split()
+        if len(fields) < 10 or "-" not in fields[6:]:
+            raise ValueError("Invalid kernel mountinfo record")
+        mountpoint = re.sub(
+            r"\\(040|011|012|134)",
+            lambda match: chr(int(match[1], 8)),
+            fields[4],
+        )
+        if not mountpoint.startswith("/") or any(
+            part in (".", "..") for part in mountpoint.split("/")
+        ):
+            raise ValueError("Invalid kernel mountpoint")
+        path = Path(mountpoint)
+        if path != directory and path.is_relative_to(directory):
+            mounts.append(path)
+    return sorted(mounts, key=lambda path: len(path.parts), reverse=True)
+
+
 def slurm_job_cgroup(contents: str, job_id: str) -> str:
     """Select the allocation's empty parent, not its populated task cgroup."""
     if not re.fullmatch(r"[1-9][0-9]*", job_id):
@@ -78,7 +100,15 @@ class DockerDaemon:
             raise ValueError(
                 "Docker scratch must be an existing directory owned by this user"
             )
-        for program in ("sudo", "docker", "dockerd", "containerd", "curl"):
+        for program in (
+            "sudo",
+            "docker",
+            "dockerd",
+            "containerd",
+            "curl",
+            "realpath",
+            "umount",
+        ):
             if shutil.which(program) is None:
                 raise RuntimeError("Required builder command is missing: " + program)
         self.cgroup_parent = slurm_job_cgroup(
@@ -341,14 +371,9 @@ class DockerDaemon:
                         self.directory / "containerd.pid",
                         "--root=" + str(self.directory / "containerd-root"),
                     )
-                if (
-                    self.directory.is_symlink()
-                    or self.directory.parent != self.scratch
-                    or self.directory.stat().st_ino != self._directory_inode
-                ):
-                    raise ValueError(
-                        "Refusing to remove a replaced Docker scratch directory"
-                    )
+                self._verify_owned_directory()
+                self._unmount_owned_filesystems()
+                self._verify_owned_directory()
                 subprocess.run(
                     [
                         "sudo",
@@ -366,6 +391,57 @@ class DockerDaemon:
         finally:
             if self._log is not None:
                 self._log.close()
+
+    def _verify_owned_directory(self):
+        if (
+            self.directory.is_symlink()
+            or self.directory.parent != self.scratch
+            or self.directory.resolve() != self.directory
+            or self.directory.stat().st_ino != self._directory_inode
+        ):
+            raise ValueError("Refusing to remove a replaced Docker scratch directory")
+
+    def _unmount_owned_filesystems(self):
+        # An interrupted BuildKit executor can leave mounts after dockerd
+        # exits. Never traverse those mounts with rm or detach them lazily.
+        deadline = time.monotonic() + 15
+
+        def remaining():
+            seconds = deadline - time.monotonic()
+            if seconds <= 0:
+                raise TimeoutError("Docker mount cleanup exceeded 15 seconds")
+            return seconds
+
+        mountinfo = Path("/proc/self/mountinfo")
+        for mountpoint in mountpoints_below(mountinfo.read_text(), self.directory):
+            self._verify_owned_directory()
+            # Docker storage is root-only. Check canonical paths with the
+            # same privileges as umount; a symlink must not redirect cleanup.
+            resolved = subprocess.run(
+                ["sudo", "-n", "realpath", "-e", "-z", "--", str(mountpoint)],
+                check=True,
+                capture_output=True,
+                timeout=remaining(),
+            )
+            if resolved.stdout != os.fsencode(mountpoint) + b"\0":
+                raise ValueError("Refusing to unmount a redirected Docker mountpoint")
+            self._verify_owned_directory()
+            subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "umount",
+                    "--no-canonicalize",
+                    "--internal-only",
+                    "--",
+                    str(mountpoint),
+                ],
+                check=True,
+                timeout=remaining(),
+            )
+        remaining()
+        if mountpoints_below(mountinfo.read_text(), self.directory):
+            raise RuntimeError("Docker mountpoints remain after cleanup")
 
     def __exit__(self, exc_type, exc_value, traceback):
         self._cleanup()
