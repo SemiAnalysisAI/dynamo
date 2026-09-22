@@ -91,7 +91,6 @@ class ClientTests(unittest.TestCase):
             "archive_sha256": "b" * 64,
             "controller_sha": "c" * 40,
             "controller_bundle_sha256": "d" * 64,
-            "reuse_image_sha": None,
         }
         values = {
             "request": request,
@@ -231,6 +230,8 @@ class ClientTests(unittest.TestCase):
         for arguments in (
             ["status"],
             ["resume"],
+            ["setup"],
+            ["cleanup"],
             ["setup-ssh"],
             ["run", "--source-sha", "a" * 40],
             ["run", "--source-dir", str(self.root)],
@@ -246,24 +247,7 @@ class ClientTests(unittest.TestCase):
                 client.main()
             self.assertEqual(error.exception.code, 2)
 
-    def test_setup_and_cleanup_use_only_the_scoped_ssh_directory(self):
-        environment = self.actions_environment()
-        context = self.actions_context(environment)
-        for action, function in (("setup", "setup_ssh"), ("cleanup", "cleanup_ssh")):
-            with (
-                self.subTest(action=action),
-                patch.object(sys, "argv", ["slurm_client.py", action]),
-                patch.object(
-                    client.ActionsContext, "from_environment", return_value=context
-                ),
-                patch.object(client, function) as operation,
-                patch.object(client, "Connection") as connection,
-            ):
-                client.main()
-                operation.assert_called_once_with(context.ssh_directory)
-                connection.assert_not_called()
-
-    def test_actions_run_builds_exact_checkout_without_image_reuse(self):
+    def test_actions_run_builds_exact_checkout(self):
         source, sha = self.checkout(
             {"file": b"source", "scripts/ci/helper.py": b"# helper\n"}
         )
@@ -291,8 +275,6 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(connection.request["source_sha"], sha)
         self.assertEqual(connection.request["controller_sha"], sha)
         self.assertEqual(connection.request["run_key"], "gh-12345-2")
-        self.assertEqual(connection.request["partition"], "auto")
-        self.assertIsNone(connection.request["reuse_image_sha"])
         self.assertEqual(
             client.read_json(context.output / "expected-request.json"),
             connection.request,
@@ -336,9 +318,7 @@ class ClientTests(unittest.TestCase):
             self.assertRaises(TimeoutError),
         ):
             client.finalize_run(context, connection)
-        action.assert_called_once_with(
-            connection, saved["remote_run"], "finalize", 180, cancel=True
-        )
+        action.assert_called_once_with(connection, saved["remote_run"], "finalize", 180)
         collect.assert_called_once_with(
             connection, saved["remote_run"], context.output, timeout=60
         )

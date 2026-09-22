@@ -176,7 +176,7 @@ class VerifyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing image build evidence"):
             verify.build_manifest(self.request, spec)
 
-    def test_external_image_envelope_checks_both_identities(self):
+    def test_image_envelope_checks_both_identities(self):
         build = {
             **self.request,
             "status": "passed",
@@ -207,11 +207,6 @@ class VerifyTests(unittest.TestCase):
         ):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 verify.build_from_image(self.request, {**envelope, field: value})
-        with self.assertRaisesRegex(ValueError, "reuse image mismatch"):
-            verify.build_from_image(
-                {**self.request, "reuse_image_sha": "f" * 64}, envelope
-            )
-
         atomic_json(self.root / "request.json", self.request)
         atomic_json(self.root / "image-manifest.json", envelope)
         with (

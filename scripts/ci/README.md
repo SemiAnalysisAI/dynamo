@@ -40,24 +40,29 @@ allows testing before merge while retaining the approval checkpoint.
 | `ROCM_SLURM_ENABLED` | Repository variable | Set to `true` to enable the manual GPU job. |
 | `ROCM_SLURM_ENVIRONMENT` | Repository variable, optional | Protected environment name; defaults to `rocm-slurm`. |
 | `SLURM_UID` | Environment variable | Numeric UID of the remote non-root account. |
-| `SLURM_SSH_CONFIG` | Environment variable | JSON connection route, described below. |
+| `SLURM_SSH_CONFIG` | Environment variable | OpenSSH host configuration, described below. |
 | `SLURM_KNOWN_HOSTS` | Environment variable | Independently verified host keys for every SSH hop. |
 | `SLURM_SSH_KEY` | Environment secret | Dedicated, unencrypted cluster private key. |
-| `SLURM_GATEWAY_SSH_KEY` | Environment secret, optional | Dedicated private key for hops using the `gateway` identity. |
+| `SLURM_GATEWAY_SSH_KEY` | Environment secret, optional | Dedicated private key for jump hosts. |
 | `SLURM_PREFERRED_PARTITION` | Environment variable, optional | Preferred partition; defaults to `compute-1`. |
 | `SLURM_FALLBACK_PARTITION` | Environment variable, optional | Fallback partition; defaults to `compute-0`. |
 
-The route accepts a login host and zero to four ordered jump hosts. Each host
-requires `hostname` and `user`; `port` defaults to `22` and `identity` defaults to
-`cluster`. The identities select the corresponding environment secrets:
+Set `SLURM_SSH_CONFIG` to standard OpenSSH host blocks defining the
+`ci-slurm-login` alias and any jump hosts. The workflow sets `ROCM_SSH_DIR` to
+its temporary credential directory; OpenSSH expands this variable in identity
+paths. For example, a route with one jump host uses:
 
-```json
-{
-  "login": {"hostname": "login.example", "user": "ci", "identity": "cluster"},
-  "jumps": [
-    {"hostname": "gateway.example", "user": "ci", "port": 22, "identity": "gateway"}
-  ]
-}
+```sshconfig
+Host ci-slurm-gateway
+  HostName gateway.example
+  User ci
+  IdentityFile ${ROCM_SSH_DIR}/gateway_key
+
+Host ci-slurm-login
+  HostName login.example
+  User ci
+  IdentityFile ${ROCM_SSH_DIR}/ssh_key
+  ProxyJump ci-slurm-gateway
 ```
 
 The workflow creates private SSH files under `RUNNER_TEMP`, enables strict host
@@ -147,5 +152,6 @@ The `rocm-slurm-RUN_ID-ATTEMPT` Actions artifact includes:
   `terminal.json`, and `completed.json` for the final verdict.
 - `collection-report.json`, which records any size-based collection omissions.
 
-Images, model weights, and SSH keys are excluded from uploaded artifacts. Shared
-content-addressed image/model caches are not pruned by failure recovery.
+Images, model weights, and SSH keys are excluded from uploaded artifacts. The
+allocation removes its run-scoped image during cleanup. The shared pinned-model
+cache is retained for subsequent runs.

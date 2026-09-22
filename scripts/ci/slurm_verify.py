@@ -252,17 +252,13 @@ def verify_build(manifest, request):
 
 
 def build_from_image(request, manifest):
-    """Validate an external image envelope before trusting its build metadata."""
+    """Validate this run's image envelope before trusting its build metadata."""
     match_identity(manifest, request)
-    require(manifest.get("status") == "passed", "image not published successfully")
+    require(manifest.get("status") == "passed", "image build did not pass")
     digest = manifest.get("sqsh_sha256")
     require(
         isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest),
         "invalid image digest",
-    )
-    require(
-        not request.get("reuse_image_sha") or digest == request["reuse_image_sha"],
-        "reuse image mismatch",
     )
     build = manifest.get("build")
     require(isinstance(build, dict), "missing image build manifest")
@@ -544,7 +540,7 @@ def workload(request, runtime_dir, job_id=None):
     require(
         evidence["provenance"].get("build_manifest_sha256")
         == sha256_json(image["build"]),
-        "runtime build differs from published image",
+        "runtime build differs from verified image",
     )
     require(
         image["build"]["contract_sha256"] == sha256_file(trusted_path),
@@ -615,19 +611,15 @@ def main():
         "command",
         choices=(
             "extract",
-            "build-manifest",
-            "verify-build",
             "image-manifest",
             "verify-image",
             "provenance",
             "workload",
-            "verify-collected",
         ),
     )
     parser.add_argument("--run-dir", type=Path, required=True)
     for option in (
         "destination",
-        "build-spec",
         "build-manifest",
         "image",
         "manifest",
@@ -640,29 +632,15 @@ def main():
     result = None
     if args.command == "extract":
         extract_source(args.run_dir, args.destination)
-    elif args.command == "build-manifest":
-        result = build_manifest(request, read_json(args.build_spec))
-    elif args.command == "verify-build":
-        verify_build(read_json(args.build_manifest), request)
     elif args.command == "image-manifest":
         result = image_manifest(request, args.image, read_json(args.build_manifest))
     elif args.command == "verify-image":
         result = verify_image(request, args.image, read_json(args.manifest))
     elif args.command == "provenance":
-        require(
-            bool(args.manifest) != bool(args.build_manifest),
-            "provenance requires exactly one of --manifest or --build-manifest",
-        )
-        build = (
-            build_from_image(request, read_json(args.manifest))
-            if args.manifest
-            else read_json(args.build_manifest)
-        )
+        build = build_from_image(request, read_json(args.manifest))
         result = provenance(request, build)
     elif args.command == "workload":
         result = workload(request, args.runtime_dir or args.run_dir)
-    elif args.command == "verify-collected":
-        result = verify_collected(request, args.runtime_dir or args.run_dir)
     if result is not None and args.output:
         atomic_json(args.output, result)
 

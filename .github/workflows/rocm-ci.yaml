@@ -60,6 +60,7 @@ jobs:
         run: |
           umask 077
           mkdir -p "$RUNNER_TEMP/dynamo-rocm/evidence"
+          printf 'ROCM_SSH_DIR=%s/dynamo-rocm/ssh\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
           printf '%s\n' "workflow_sha=$GITHUB_SHA" "phase=before-checkout" \
             > "$RUNNER_TEMP/dynamo-rocm/evidence/controller-start.txt"
       - name: Checkout the workflow commit and materialize LFS files
@@ -78,7 +79,36 @@ jobs:
           SLURM_SSH_KEY: ${{ secrets.SLURM_SSH_KEY }}
           SLURM_GATEWAY_SSH_KEY: ${{ secrets.SLURM_GATEWAY_SSH_KEY }}
           SLURM_KNOWN_HOSTS: ${{ vars.SLURM_KNOWN_HOSTS }}
-        run: python3 -B scripts/ci/slurm_client.py setup
+        run: |
+          set -euo pipefail
+          : "${SLURM_SSH_CONFIG:?Missing SSH host configuration}"
+          : "${SLURM_SSH_KEY:?Missing cluster SSH key}"
+          : "${SLURM_KNOWN_HOSTS:?Missing pinned host keys}"
+          umask 077
+          mkdir "$ROCM_SSH_DIR"
+          printf '%s\n' "$SLURM_SSH_KEY" > "$ROCM_SSH_DIR/ssh_key"
+          printf '%s\n' "$SLURM_KNOWN_HOSTS" > "$ROCM_SSH_DIR/known_hosts"
+          cat > "$ROCM_SSH_DIR/config" <<EOF
+          Host *
+            BatchMode yes
+            IdentitiesOnly yes
+            IdentityAgent none
+            ForwardAgent no
+            StrictHostKeyChecking yes
+            GlobalKnownHostsFile /dev/null
+            UserKnownHostsFile "$ROCM_SSH_DIR/known_hosts"
+            ConnectTimeout 20
+            ServerAliveInterval 30
+            ServerAliveCountMax 3
+          EOF
+          printf '%s\n' "$SLURM_SSH_CONFIG" >> "$ROCM_SSH_DIR/config"
+          ssh-keygen -y -P '' -f "$ROCM_SSH_DIR/ssh_key" > /dev/null
+          ssh-keygen -l -f "$ROCM_SSH_DIR/known_hosts" > /dev/null
+          if [[ -n "$SLURM_GATEWAY_SSH_KEY" ]]; then
+            printf '%s\n' "$SLURM_GATEWAY_SSH_KEY" > "$ROCM_SSH_DIR/gateway_key"
+            ssh-keygen -y -P '' -f "$ROCM_SSH_DIR/gateway_key" > /dev/null
+          fi
+          ssh -G -T -F "$ROCM_SSH_DIR/config" ci-slurm-login > /dev/null
       - name: Check cluster access before submitting a GPU job
         timeout-minutes: 2
         run: python3 -B scripts/ci/slurm_client.py preflight
@@ -106,6 +136,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Remove temporary SSH material
-        if: always() && steps.controller_checkout.outcome == 'success'
+        if: always()
         timeout-minutes: 1
-        run: python3 -B scripts/ci/slurm_client.py cleanup
+        shell: bash
+        run: rm -rf -- "$RUNNER_TEMP/dynamo-rocm/ssh"

@@ -89,8 +89,6 @@ def load_request(run):
         validate_sha(req[key])
     for key in ("archive_sha256", "controller_bundle_sha256"):
         validate_sha(req[key], 64)
-    if req.get("reuse_image_sha"):
-        validate_sha(req["reuse_image_sha"], 64)
     expected = {
         "schema_version": 1,
         "suite": "aggregate",
@@ -101,7 +99,7 @@ def load_request(run):
         "queue_timeout_seconds": 1800,
         "controller_timeout_seconds": 17100,
     }
-    for key in ("partition", "preferred_partition", "fallback_partition"):
+    for key in ("preferred_partition", "fallback_partition"):
         validate_partition(req[key])
     if req["preferred_partition"] == req["fallback_partition"]:
         raise ValueError("preferred and fallback partitions must differ")
@@ -244,7 +242,7 @@ def snapshot(run):
         result.update(
             active=False,
             phase="indeterminate",
-            reason="monitor heartbeat expired; resume to recover",
+            reason="monitor heartbeat expired; finalization required",
         )
     return result
 
@@ -269,8 +267,14 @@ def idle_gpu_node(record, preferred_partition="compute-1"):
 
 def select_partition(run, req):
     """Choose from current scheduler evidence; never treat a query failure as idle."""
-    policy = req["partition"]
-    evidence = {"requested_policy": policy, "observed_at": time.time(), "queries": []}
+    preferred = req["preferred_partition"]
+    fallback = req["fallback_partition"]
+    evidence = {
+        "preferred_partition": preferred,
+        "fallback_partition": fallback,
+        "observed_at": time.time(),
+        "queries": [],
+    }
 
     def query(args):
         result = command(args)
@@ -298,37 +302,29 @@ def select_partition(run, req):
             raise ValueError("invalid partition selection evidence")
         return record
 
-    preferred = req["preferred_partition"] if policy == "auto" else policy
     chosen = preferred
     state = partition(preferred)
-    if policy == "auto":
-        candidates = []
-        if state["State"] == "UP":
-            output = query(["scontrol", "show", "nodes", "-o"])
-            records = [
-                parse_record(line) for line in output.splitlines() if line.strip()
-            ]
-            if not records or any(
-                not {"NodeName", "State", "Partitions", "Gres"}.issubset(record)
-                for record in records
-            ):
-                raise ValueError("invalid node selection evidence")
-            candidates = [
-                record["NodeName"]
-                for record in records
-                if idle_gpu_node(record, preferred)
-            ]
-        evidence["eligible_idle_nodes"] = sorted(candidates)
-        if not candidates:
-            chosen = req["fallback_partition"]
-            state = partition(chosen)
-            evidence[
-                "reason"
-            ] = f"no eligible idle GPU node in available {preferred} partition"
-        else:
-            evidence["reason"] = f"{preferred} has eligible idle GPU nodes"
+    candidates = []
+    if state["State"] == "UP":
+        output = query(["scontrol", "show", "nodes", "-o"])
+        records = [parse_record(line) for line in output.splitlines() if line.strip()]
+        if not records or any(
+            not {"NodeName", "State", "Partitions", "Gres"}.issubset(record)
+            for record in records
+        ):
+            raise ValueError("invalid node selection evidence")
+        candidates = [
+            record["NodeName"] for record in records if idle_gpu_node(record, preferred)
+        ]
+    evidence["eligible_idle_nodes"] = sorted(candidates)
+    if not candidates:
+        chosen = fallback
+        state = partition(chosen)
+        evidence[
+            "reason"
+        ] = f"no eligible idle GPU node in available {preferred} partition"
     else:
-        evidence["reason"] = "explicit partition override"
+        evidence["reason"] = f"{preferred} has eligible idle GPU nodes"
     if state["State"] != "UP":
         raise RuntimeError("selected partition is not available")
     evidence["chosen_partition"] = chosen
@@ -576,11 +572,8 @@ def monitor(run):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "action", choices=("start", "status", "resume", "finalize", "_monitor")
-    )
+    parser.add_argument("action", choices=("start", "status", "finalize", "_monitor"))
     parser.add_argument("--run-dir", required=True, type=Path)
-    parser.add_argument("--cancel-if-active", action="store_true")
     parser.add_argument("--deadline-seconds", type=int, default=240)
     args = parser.parse_args()
     run = args.run_dir.resolve()
@@ -591,9 +584,8 @@ def main():
     if not 1 <= args.deadline_seconds <= 240:
         raise ValueError("finalizer deadline must be 1..240 seconds")
     deadline = time.monotonic() + args.deadline_seconds
-    cancelling = args.action == "finalize" and args.cancel_if_active
     with lock(run):
-        if cancelling:
+        if args.action == "finalize":
             atomic_json(run / "cancel-request.json", {"requested_at": time.time()})
             if not (run / "submission-intent.json").exists():
                 cancelled_before_submission(run)
@@ -620,26 +612,16 @@ def main():
             atomic_json(
                 run / "monitor.json", {"pid": child.pid, "started_at": time.time()}
             )
-    if args.action in ("resume", "finalize"):
-        receipt = (
-            await_submission(run, req, deadline)
-            if cancelling
-            else (
-                read_json(run / "receipt.json")
-                if (run / "receipt.json").exists()
-                else recover(run, req, deadline=deadline)
-            )
-        )
+    if args.action == "finalize":
+        receipt = await_submission(run, req, deadline)
         if receipt:
-            if cancelling:
-                cancel(run, req, receipt["job_id"], deadline=deadline)
+            cancel(run, req, receipt["job_id"], deadline=deadline)
             while True:
                 evidence = inspect_job(
                     run, req, receipt["job_id"], timeout=command_timeout(deadline)
                 )
                 if (
-                    args.action != "finalize"
-                    or evidence is None
+                    evidence is None
                     or evidence["state"] in TERMINAL
                     or time.monotonic() + 5 >= deadline
                 ):

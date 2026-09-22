@@ -27,7 +27,6 @@ from slurm_common import (
     validate_run_key,
     validate_sha,
 )
-from slurm_ssh import cleanup_ssh, setup_ssh
 from slurm_verify import verify_collected
 
 HERE = Path(__file__).resolve().parent
@@ -265,9 +264,7 @@ def remote_program():
 
 
 def preflight(connection, context):
-    return connection.python(
-        remote_program(), "preflight", str(context.expected_uid), ""
-    )
+    return connection.python(remote_program(), "preflight", str(context.expected_uid))
 
 
 def collect(connection, remote_run, output, timeout=120):
@@ -291,7 +288,7 @@ def collect(connection, remote_run, output, timeout=120):
             handle.extractall(output, filter="data")
 
 
-def remote_action(connection, remote_run, action, deadline=240, cancel=False):
+def remote_action(connection, remote_run, action, deadline=240):
     words = [
         *PYTHON,
         str(PurePosixPath(remote_run) / "controller/slurm-submit.py"),
@@ -301,8 +298,6 @@ def remote_action(connection, remote_run, action, deadline=240, cancel=False):
         "--deadline-seconds",
         str(deadline),
     ]
-    if cancel:
-        words.append("--cancel-if-active")
     return json.loads(
         connection.call(
             words, timeout=deadline if action == "finalize" else 60, capture_output=True
@@ -357,8 +352,6 @@ def verdict(output):
     validate_sha(image["sqsh_sha256"], 64)
     if workload.get("sqsh_sha256") != image["sqsh_sha256"]:
         raise ValueError("Workload image identity mismatch")
-    if request.get("reuse_image_sha"):
-        raise ValueError("Actions qualification requires a newly built image")
     verify_collected(request, output)
     return {"status": "passed", "job_id": expected, "run_key": request["run_key"]}
 
@@ -444,9 +437,7 @@ def start_run(context, connection, info):
             "archive_sha256": source_manifest["archive_sha256"],
             "controller_sha": context.sha,
             "controller_bundle_sha256": bundle_sha,
-            "reuse_image_sha": None,
             "suite": "aggregate",
-            "partition": "auto",
             "preferred_partition": context.preferred_partition,
             "fallback_partition": context.fallback_partition,
             "gpus": 1,
@@ -504,7 +495,7 @@ def finalize_run(context, connection):
         if saved.get(key) != expected:
             raise ValueError(f"Saved Actions run identity mismatch: {key}")
     try:
-        state = remote_action(connection, remote_run, "finalize", 180, cancel=True)
+        state = remote_action(connection, remote_run, "finalize", 180)
         print(json.dumps(state), flush=True)
         atomic_json(output / "client-status.json", state)
     finally:
@@ -515,14 +506,9 @@ def main():
     if sys.version_info < (3, 12):
         raise ValueError("The Slurm client requires Python 3.12 or newer")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "action", choices=("setup", "preflight", "run", "finalize", "cleanup")
-    )
+    parser.add_argument("action", choices=("preflight", "run", "finalize"))
     args = parser.parse_args()
     context = ActionsContext.from_environment()
-    if args.action in ("setup", "cleanup"):
-        (setup_ssh if args.action == "setup" else cleanup_ssh)(context.ssh_directory)
-        return
     connection = Connection(context)
     if args.action == "finalize":
         finalize_run(context, connection)

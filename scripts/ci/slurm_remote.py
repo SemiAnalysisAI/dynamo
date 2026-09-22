@@ -35,9 +35,6 @@ EVIDENCE_FILES = {
     "allocation.json",
     "completed.json",
     "hip.json",
-    "import-origins.json",
-    "test-manifest.json",
-    "test-summary.json",
     "contract.json",
     "provenance.json",
     "receipt.json",
@@ -51,9 +48,7 @@ EVIDENCE_FILES = {
     "scheduler-latest.json",
     "submission-intent.json",
     "partition-selection.json",
-    "collection.txt",
     "environment.json",
-    "wheel-manifest.json",
     "imports-collection.json",
     "frontend-collection.json",
     "aggregate-collection.json",
@@ -62,7 +57,7 @@ EVIDENCE_FILES = {
 }
 
 
-def preflight(root, expected_uid, image):
+def preflight(root, expected_uid):
     if sys.version_info < (3, 12):
         raise ValueError("The Slurm login host requires Python 3.12 or newer")
     if os.getuid() != expected_uid:
@@ -71,22 +66,10 @@ def preflight(root, expected_uid, image):
     missing = [name for name in required if not shutil.which(name)]
     if missing:
         raise ValueError("Missing commands: " + ", ".join(missing))
-    if image:
-        if not re.fullmatch(r"[0-9a-f]{64}", image):
-            raise ValueError("Invalid image digest")
-        location = root / "images" / image
-        for name in ("image.sqsh", "image-manifest.json"):
-            if not os.access(location / name, os.R_OK):
-                raise ValueError("Local parity artifact not readable: " + name)
-        manifest = json.loads((location / "image-manifest.json").read_text())
-        if manifest.get("sqsh_sha256") != image:
-            raise ValueError("Stored image identity mismatch")
     return {
         "uid": os.getuid(),
         "host": socket.gethostname(),
-        "home": str(root.parent),
         "root": str(root),
-        "image_readable": bool(image),
     }
 
 
@@ -100,7 +83,7 @@ def stage(root, key, digest, stream):
     runs.mkdir(mode=0o700, exist_ok=True)
     target = runs / key
     if target.exists():
-        raise ValueError("Run already exists; use status/resume with the recorded key")
+        raise ValueError("Run already exists for this Actions attempt")
     with tempfile.TemporaryDirectory(prefix=".stage-", dir=root) as temporary:
         temporary = Path(temporary)
         package = temporary / "package.tar"
@@ -170,7 +153,6 @@ def main():
     commands = parser.add_subparsers(dest="action", required=True)
     check = commands.add_parser("preflight")
     check.add_argument("expected_uid", type=int)
-    check.add_argument("image")
     upload = commands.add_parser("stage")
     upload.add_argument("key")
     upload.add_argument("digest")
@@ -179,7 +161,7 @@ def main():
     args = parser.parse_args()
     root = Path.home() / "dynamo-rocm-ci"
     if args.action == "preflight":
-        print(json.dumps(preflight(root, args.expected_uid, args.image)))
+        print(json.dumps(preflight(root, args.expected_uid)))
     elif args.action == "stage":
         print(json.dumps(stage(root, args.key, args.digest, sys.stdin.buffer)))
     else:

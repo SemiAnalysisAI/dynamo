@@ -22,12 +22,10 @@ from slurm_verify import require
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", choices=["aggregate"], required=True)
-    parser.add_argument("--python", required=True)
     parser.add_argument("--results", type=Path, required=True)
     args = parser.parse_args()
     require(
-        Path(args.python) == Path("/opt/dynamo/venv/bin/python3"),
+        Path(sys.executable) == Path("/opt/dynamo/venv/bin/python3"),
         "Tests require the image's overlay interpreter",
     )
     require(os.environ.get("SLURM_JOB_ID"), "Tests require a Slurm allocation")
@@ -63,14 +61,14 @@ def main():
         == contract["model"]["revision"],
         "Cached model revision mismatch",
     )
-    # Full cache rehash protects explicit artifact reuse and offline resolution.
+    # Verify the pinned model cache before using it offline.
     files = inventory(Path("/models"))
     files.pop("model-content.json")
     require(files == model_content["files"], "Cached model content mismatch")
     validator = "/results/controller/slurm_verify.py"
     subprocess.run(
         [
-            args.python,
+            sys.executable,
             validator,
             "provenance",
             "--run-dir",
@@ -124,11 +122,11 @@ def main():
         },
     }
     (result / "contract.json").write_text(json.dumps(runtime_contract, indent=2) + "\n")
-    subprocess.run([args.python, "-m", "pip", "check"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "check"], check=True)
     for suite in contract["suites"]:
         subprocess.run(
             [
-                args.python,
+                sys.executable,
                 "-I",
                 str(Path(__file__).with_name("pytest_driver.py")),
                 suite,
