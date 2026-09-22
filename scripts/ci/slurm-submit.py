@@ -107,7 +107,7 @@ def load_request(run):
         raise ValueError("unsupported or unbounded allocation request")
     if (
         run.name != req["run_key"]
-        or run.parent != Path.home() / "dynamo-rocm-ci" / "runs"
+        or run.parent != (Path.home() / "dynamo-rocm-ci" / "runs").resolve()
     ):
         raise ValueError("run directory must be the canonical per-user run path")
     if req.get("expected_uid") is not None and os.getuid() != req["expected_uid"]:

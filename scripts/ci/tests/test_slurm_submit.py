@@ -461,6 +461,47 @@ class SchedulerTests(unittest.TestCase):
         ):
             submit.load_request(self.run)
 
+    def test_request_resolves_symlinked_home_and_rejects_escaped_runs(self):
+        request = {
+            **self.req,
+            "schema_version": 1,
+            "controller_sha": "b" * 40,
+            "archive_sha256": "c" * 64,
+            "controller_bundle_sha256": "d" * 64,
+            "suite": "aggregate",
+            "gpus": 1,
+            "cpus": 16,
+            "mem_gib": 64,
+            "time_limit_minutes": 240,
+            "queue_timeout_seconds": 1800,
+            "controller_timeout_seconds": 17100,
+        }
+        home = self.run / "home"
+        linked_home = self.run / "linked-home"
+        canonical = home / "dynamo-rocm-ci" / "runs" / request["run_key"]
+        unrelated = self.run / "other-runs" / request["run_key"]
+        for run in (canonical, unrelated):
+            run.mkdir(parents=True)
+            submit.atomic_json(run / "request.json", request)
+        linked_home.symlink_to(home, target_is_directory=True)
+        escaped = canonical.parent / "escaped"
+        escaped.symlink_to(unrelated, target_is_directory=True)
+
+        with (
+            patch.object(Path, "home", return_value=linked_home),
+            patch.object(submit, "verify_controller") as verify,
+        ):
+            self.assertEqual(submit.load_request(canonical.resolve()), request)
+            verify.assert_called_once_with(canonical.resolve())
+            verify.reset_mock()
+            for run in (unrelated, escaped):
+                with (
+                    self.subTest(run=run),
+                    self.assertRaisesRegex(ValueError, "canonical per-user run path"),
+                ):
+                    submit.load_request(run.resolve())
+            verify.assert_not_called()
+
     def test_falls_back_for_busy_drained_small_or_gpu_less_nodes(self):
         original = "NodeName=node1 State=IDLE Partitions=compute-1 Gres=gpu:8 CPUEfctv=128 CPUAlloc=0 RealMemory=1500000 AllocMem=0"
         for node in (
